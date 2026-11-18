@@ -38,12 +38,12 @@ Antes de cada push: `git ls-files` y `git diff --stat origin/main..` revisados a
 Recomendación: **público**. Las descargas de Releases públicas no necesitan credenciales y `releases/latest/download/`
 no consume la cuota de la API (importante en clase, donde todos comparten IP). Un repo privado obligaría a meter un token
 en el cliente (prohibido) o a montar otra distribución. El código no contiene material de Nintendo (auditoría §5).
-**Decisión del propietario pendiente (P1).**
+**Decidido por el propietario el 18/11/2026: público, `hernandezmarkel/wii-launcher`.**
 
 ## Pasos para crear el remoto (solo con autorización)
 
 ```bash
-gh repo create MarkelHernandez/wii-launcher --public --source . --remote origin --description "Launcher unificado para ports nativos de Wii en PC"
+gh repo create hernandezmarkel/wii-launcher --public --source . --remote origin --description "Launcher unificado para ports nativos de Wii en PC"
 git push -u origin main
 git push -u origin feature/launcher-autoupdate
 ```

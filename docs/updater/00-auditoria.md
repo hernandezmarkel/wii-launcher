@@ -119,7 +119,7 @@ Los ~40 min por port no intervienen: el build del launcher no compila ningún ju
 
 ## 7. Decisiones pendientes del propietario
 
-- **[P1]** Crear el repositorio remoto, su visibilidad (recomendado: público) y la cuenta (`gh` tiene sesión como `MarkelHernandez`).
+- **[P1]** ~~Repositorio remoto~~ Decidido el 18/11/2026: público, `hernandezmarkel/wii-launcher`.
 - **[P2]** Guardar la clave privada de firma como secreto del repositorio (`WL_UPDATE_SIGNING_KEY`) y una copia de seguridad offline.
 - **[P3]** Autorizar el push de la rama y la primera release (beta y después stable).
 - **[P5]** Licencia del código propio del launcher (no la elijo yo; sin ella el repo público es «todos los derechos reservados»).

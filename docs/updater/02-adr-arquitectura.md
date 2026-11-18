@@ -92,7 +92,7 @@ Reglas del verificador (todas obligatorias, cualquier fallo = rechazo sin instal
 
 ## Origen de confianza y red
 
-- Repositorio fijado en compilación (`WL_UPDATE_REPO`, p. ej. `MarkelHernandez/wii-launcher`).
+- Repositorio fijado en compilación (`WL_UPDATE_REPO`, p. ej. `hernandezmarkel/wii-launcher`).
 - **Stable:** `https://github.com/<repo>/releases/latest/download/update.txt` (y `.sig`). `latest` nunca devuelve
   pre-releases ni borradores y **no consume la cuota de la API REST**.
 - **Beta (opt-in):** `https://api.github.com/repos/<repo>/releases?per_page=10` con `ETag`/`If-None-Match` (un 304 no gasta

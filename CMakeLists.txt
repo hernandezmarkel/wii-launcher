@@ -29,7 +29,7 @@ target_link_libraries(wlaunch PRIVATE wl_core)
 
 # ---- Autoactualización del launcher (docs/updater/02-adr-arquitectura.md). Solo Windows: WinHTTP + CNG.
 set(WL_VERSION_SUFFIX "" CACHE STRING "Sufijo SemVer de pre-release, p. ej. beta.1 (vacío = estable)")
-set(WL_UPDATE_REPO "MarkelHernandez/wii-launcher" CACHE STRING "Repositorio GitHub (dueño/repo) de las Releases del launcher")
+set(WL_UPDATE_REPO "hernandezmarkel/wii-launcher" CACHE STRING "Repositorio GitHub (dueño/repo) de las Releases del launcher")
 # Clave pública de firma de releases (P-256, X||Y en hex). La privada NUNCA está en el repo.
 # Generada el 18/11/2026 con `wl_release keygen`; rotación en docs/updater/seguridad-y-recuperacion.md.
 set(WL_UPDATE_PUBKEY "21087616d80cdb02bc0d82cdf71e4bdda9317d2c9531bf4b9f2dfbe6dd3e3a55222cee1b2266dddeaf1368bc3357a5d818c02dbde4925657aed177bf50557186" CACHE STRING "Clave pública anclada para verificar actualizaciones")
