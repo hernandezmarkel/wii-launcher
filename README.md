@@ -29,7 +29,7 @@ docs/       arquitectura, updater (auditoría, ADR, publicación, seguridad, gu�
 
 ## Compilar
 
-Requisitos: CMake ≥ 3.20, Ninja y MinGW-w64 g++ (probado con GCC 15.2). En CI se usa MSYS2 MINGW64.
+Requisitos: CMake ≥ 3.20, Ninja y MinGW-w64 g++ (probado con GCC 15.2). En CI se usa MSYS2 UCRT64.
 
 ```bash
 bash tools/descargar-fuentes.sh _fonts
