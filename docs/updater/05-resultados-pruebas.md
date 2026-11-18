@@ -87,6 +87,13 @@ Fecha: 18/11/2026. Entorno: portátil de desarrollo (i5-1334U, 16 GB, Windows 11
 | Descarga típica | 424 MB (ZIP de clase completo) | ~9,3 MB (solo el exe; diferencial por archivo) |
 | Build limpio del launcher | configurar 216 s + compilar 103 s | igual; incremental de la UI 5-15 s. Ningún juego se compila |
 
+## Actualización real contra GitHub (18/11/2026, 23:01, portátil sin cargador)
+
+| Prueba | Estado | Evidencia |
+|---|---|---|
+| beta.1 publicada → beta.2 publicada | PASS (GitHub real) | beta.1 bajada de la Release, canal beta, datos aparte (`WL_LOCALAPPDATA`). Detecta beta.2 al abrir en 1,3 s (API con ETag); «Actualizar» baja 2 archivos (9,46 MB: exe y CHANGELOG; fuentes y manifests no cambian); firma y hashes verificados; aplicador en 1 s; el exe instalado tiene el SHA-256 de la beta.2 publicada; `online_name` conservado; copia de la beta.1 en `.wl-backup`; al reabrir, «al día» en 227 ms |
+| Paquete completo `WiiPorts-1.0.0-beta.2.zip` | PASS (contenido) | 31.601 archivos, 401 MB: launcher, instaladores de los tres juegos y servidor LAN; sin `pgdata`, `pgpass.local`, logs, `config.xml` ni `obj` |
+
 ## Pendiente de validar en PCs reales (cuando haya release beta autorizada)
 
 1. PC limpio: descargar el ZIP de la beta, abrir, ver «Launcher v1.0.0».
