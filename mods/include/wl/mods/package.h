@@ -85,6 +85,17 @@ struct PackagePlan {
 PackagePlan analyze_package(const PackageSource& source, const Fst& fst, const GameModSupport& support,
                             const std::string& disc_id);
 
+// Comprobación previa a descargar, solo con los NOMBRES del archivo (árbol que da el proveedor).
+// No sustituye al análisis tras descargar: es para no ofrecer como instalable lo que seguro no funciona.
+enum class QuickVerdict { Compatible, NeedsDownload, Incompatible };
+struct QuickCheck {
+    QuickVerdict verdict = QuickVerdict::NeedsDownload;
+    std::string reason;
+    size_t files = 0;   // archivos de tu disco que cambiaría
+};
+QuickCheck quick_check(const std::vector<std::string>& names, const Fst& fst, const GameModSupport& support,
+                       const std::string& disc_id);
+
 // Operaciones efectivas de un mod con una selección de opciones (id de opción -> elección 1-based, 0 = no).
 std::vector<DiscOp> effective_ops(const Json& mod_json, const std::map<std::string, int>& choices);
 

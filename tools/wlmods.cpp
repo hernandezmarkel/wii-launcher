@@ -7,11 +7,13 @@
 //   wlmods <juego> fingerprint [--profile P]
 //   wlmods <juego> launch [--profile P] [--seconds N]
 // Variables: WL_MODS_EXPERIMENTAL=1 permite lanzar un juego sin prueba A/B (solo para hacer esa prueba).
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 
 #include "wl/catalog.h"
+#include "wl/mods/gamebanana.h"
 #include "wl/mods/launch.h"
 #include "wl/mods/store.h"
 #include "wl/process.h"
@@ -124,6 +126,55 @@ int main(int argc, char** argv) {
         for (const auto& f : eff.files) std::cout << "archivo " << f.disc << " " << f.sha256.substr(0, 16) << " (" << f.mod_id << ")\n";
         std::cout << "base " << store.base().base_content_id << "\nfingerprint " << eff.fingerprint << "\n";
         return eff.problems.empty() ? 0 : 2;
+    }
+    if (cmd == "catalog" || cmd == "gb-check" || cmd == "gb-install") {
+        auto http = upd::make_winhttp_client();
+        GameBananaProvider gb(*http, store.root() / "cache" / "catalog");
+        int64_t gid = gamebanana_game(game);
+        if (cmd == "catalog") {
+            CatalogPage page;
+            auto t0 = std::chrono::steady_clock::now();
+            if (!gb.list(gid, opt.count("page") ? std::atoi(opt["page"].c_str()) : 1, a.size() > 2 ? a[2] : "", page, error)) return fail(error);
+            double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            for (const auto& it : page.items) std::cout << it.id << "\t[" << it.category << "]\t" << it.name << "\t" << it.author << "\n";
+            std::cout << page.items.size() << " de " << page.total << (page.from_cache ? " (caché)" : "") << " en " << (int)ms << " ms\n";
+            return 0;
+        }
+        if (a.size() < 3) return fail("falta el id del mod");
+        CatalogDetail d;
+        if (!gb.detail(std::atoll(a[2].c_str()), d, error)) return fail(error);
+        std::cout << d.item.name << " · " << d.item.author << " · licencia: " << d.license.substr(0, 120) << "\n";
+        for (const auto& f : d.files) {
+            std::vector<std::string> tree;
+            std::string te;
+            QuickCheck q;
+            if (gb.file_tree(f.id, tree, te)) q = quick_check(tree, store.fst(), store.support(), store.base().disc_id);
+            else q.reason = te;
+            const char* v = q.verdict == QuickVerdict::Compatible ? "COMPATIBLE" : q.verdict == QuickVerdict::Incompatible ? "INCOMPATIBLE" : "POR COMPROBAR";
+            std::cout << "  archivo " << f.id << " " << f.name << " " << f.size << " B av=" << f.av_result << " -> " << v << " " << q.reason
+                      << (q.files ? " (" + std::to_string(q.files) + " archivos)" : "") << "\n";
+            if (cmd == "gb-install" && opt.count("file") && std::to_string(f.id) == opt["file"]) {
+                if (q.verdict == QuickVerdict::Incompatible) return fail("incompatible: " + q.reason);
+                fs::path dl = store.root() / "staging" / ("descarga-" + std::to_string(f.id) + ".zip");
+                if (!gb.download(f, dl, error)) return fail(error);
+                ModMeta meta;
+                meta.id = "gamebanana." + std::to_string(d.item.id);
+                meta.name = d.item.name;
+                meta.version = f.version.empty() ? d.item.version : f.version;
+                meta.provider = "gamebanana";
+                meta.source_id = std::to_string(d.item.id);
+                meta.source_page = d.item.profile_url;
+                meta.license = d.license.substr(0, 300);
+                meta.author = d.item.author;
+                InstalledMod mod;
+                bool ok = store.install(dl, meta, mod, error);
+                std::error_code ec;
+                fs::remove(dl, ec);
+                if (!ok) return fail(error);
+                std::cout << "instalado " << mod.id() << " " << mod.version() << " clave " << mod.key << "\n";
+            }
+        }
+        return 0;
     }
     if (cmd == "launch") {
         auto adapter = make_adapter(*manifest);

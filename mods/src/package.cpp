@@ -458,6 +458,51 @@ PackagePlan analyze_package(const PackageSource& source, const Fst& fst, const G
     return plan;
 }
 
+namespace {
+class NameSource : public PackageSource {
+public:
+    std::vector<SourceEntry> list;
+    const std::vector<SourceEntry>& entries() const override { return list; }
+    bool read_small(const std::string&, std::string&, size_t, std::string& error) const override { error = "sin descargar"; return false; }
+    bool extract(const std::string&, const fs::path&, std::string& error, const std::function<bool()>&) const override { error = "sin descargar"; return false; }
+};
+}  // namespace
+
+QuickCheck quick_check(const std::vector<std::string>& names, const Fst& fst, const GameModSupport& support, const std::string& disc_id) {
+    QuickCheck q;
+    NameSource src;
+    std::set<std::string> seen;
+    bool xml = false;
+    for (const auto& raw : names) {
+        if (!raw.empty() && (raw.back() == '/' || raw.back() == '\\')) continue;
+        std::string norm, why;
+        if (!normalize_relative(raw, norm, why)) {
+            // Nombres no ASCII en documentación son habituales; en el resto, el ZIP se rechazará al abrirlo.
+            if (classify(raw) == Kind::Doc) continue;
+            q.verdict = QuickVerdict::Incompatible;
+            q.reason = "ruta no segura en el paquete (" + why + ")";
+            return q;
+        }
+        if (!seen.insert(fold_key(norm)).second) continue;
+        xml |= classify(norm) == Kind::RiivoXml;
+        src.list.push_back({norm, 0});
+    }
+    PackagePlan plan = analyze_package(src, fst, support, disc_id);
+    if (xml) {
+        // El XML hay que leerlo: solo cuentan los bloqueos que no vienen de no haberlo descargado.
+        for (const auto& b : plan.blocking)
+            if (b.find("sin descargar") == std::string::npos) { q.verdict = QuickVerdict::Incompatible; q.reason = b; return q; }
+        q.verdict = QuickVerdict::NeedsDownload;
+        q.reason = "Riivolution: se comprobará el XML al descargar";
+        return q;
+    }
+    if (!plan.blocking.empty()) { q.verdict = QuickVerdict::Incompatible; q.reason = plan.blocking.front(); return q; }
+    for (const auto& [id, ops] : plan.patches) q.files += ops.size();
+    q.verdict = q.files ? QuickVerdict::Compatible : QuickVerdict::Incompatible;
+    if (!q.files) q.reason = "no cambia ningún archivo de tu disco";
+    return q;
+}
+
 std::vector<DiscOp> effective_ops(const Json& mod, const std::map<std::string, int>& choices) {
     std::vector<std::string> order;
     for (const auto& a : mod["always"].elements()) order.push_back(a.str());

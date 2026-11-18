@@ -11,6 +11,7 @@
 #include <set>
 
 #include "wl/mods/fst.h"
+#include "wl/mods/gamebanana.h"
 #include "wl/mods/json.h"
 #include "wl/mods/package.h"
 #include "wl/mods/safe_path.h"
@@ -461,6 +462,110 @@ void test_store(const fs::path& tmp) {
     MCHECK(!again.load_profile("roto", bad, e));
 }
 
+// ---- Proveedor con un servidor simulado (nunca se usa la red real en las pruebas)
+struct MockHttp : wl::upd::HttpClient {
+    std::map<std::string, wl::upd::HttpResponse> routes;
+    std::vector<std::string> seen;
+    wl::upd::HttpResponse get(const wl::upd::HttpRequest& req) override {
+        seen.push_back(req.url);
+        auto it = routes.find(req.url);
+        wl::upd::HttpResponse r;
+        if (it == routes.end()) { r.status = 404; return r; }
+        r = it->second;
+        if (r.status == 200 && r.body.size() > req.max_bytes) { wl::upd::HttpResponse big; big.error = "grande"; return big; }
+        if (r.status == 200 && !req.to_file.empty()) { put(req.to_file, r.body); r.body.clear(); }
+        return r;
+    }
+    void ok(const std::string& url, const std::string& body) { routes[url].status = 200; routes[url].body = body; }
+    void redirect(const std::string& url, const std::string& to) { routes[url].status = 302; routes[url].headers["location"] = to; }
+};
+
+void test_gamebanana(const fs::path& tmp) {
+    MCHECK(gamebanana_url_allowed("https://gamebanana.com/dl/1"));
+    MCHECK(gamebanana_url_allowed("https://files.gamebanana.com/mods/x.zip"));
+    for (const char* bad : {"http://gamebanana.com/dl/1", "https://gamebanana.com.evil.com/x", "https://evil.com/x", "file:///c:/x",
+                            "https://user@gamebanana.com/x", "https://gamebanana.com:8443/x", "https://192.168.1.10/x"})
+        MCHECK(!gamebanana_url_allowed(bad));
+    MCHECK(gamebanana_game("wiiparty") == 6370 && gamebanana_game("brawl") == 5678 && gamebanana_game("x") == 0);
+    MCHECK(strip_html("<b>Hola</b> &amp; <a href='x'>adiós</a>") == "Hola & adiós");
+
+    MockHttp http;
+    GameBananaProvider gb(http, tmp / "gbcache");
+    gb.set_min_interval(std::chrono::milliseconds(0));
+    std::string e;
+    const std::string list_url = "https://gamebanana.com/apiv11/Mod/Index?_nPage=1&_nPerpage=20&_aFilters%5BGeneric_Game%5D=6370";
+    // B12: registros incompletos y de otro juego se descartan; decimales en la respuesta no rompen nada.
+    http.ok(list_url, R"j({"_aMetadata":{"_nRecordCount":3,"_bIsComplete":true,"_fRating":4.5},"_aRecords":[
+        {"_idRow":1,"_sModelName":"Mod","_sName":"Bueno","_aGame":{"_idRow":6370},"_sProfileUrl":"https://gamebanana.com/mods/1"},
+        {"_idRow":2,"_sModelName":"Mod","_sName":"Otro juego","_aGame":{"_idRow":5896}},
+        {"_sModelName":"Mod","_aGame":{"_idRow":6370}},
+        {"_idRow":4,"_sModelName":"Mod","_sName":"Url rara","_aGame":{"_idRow":6370},"_sProfileUrl":"javascript:alert(1)"}]})j");
+    CatalogPage page;
+    MCHECK(gb.list(6370, 1, "", page, e));
+    MCHECK(page.items.size() == 2 && page.items[0].name == "Bueno" && page.total == 3);
+    MCHECK(page.items[1].profile_url == "https://gamebanana.com/mods/4");
+    // B05: proveedor caído → se usa la caché (modo sin conexión) y no falla el launcher.
+    http.routes[list_url].status = 503;
+    MockHttp down;
+    GameBananaProvider gb2(down, tmp / "gbcache");
+    gb2.set_min_interval(std::chrono::milliseconds(0));
+    CatalogPage cached;
+    MCHECK(gb2.list(6370, 1, "", cached, e) && cached.from_cache);
+    GameBananaProvider gb3(down, tmp / "gbcache-vacia");
+    gb3.set_min_interval(std::chrono::milliseconds(0));
+    MCHECK(!gb3.list(6370, 1, "", cached, e) && !e.empty());
+    MCHECK(!gb.list(6370, 1, "", cached, e) == false);   // la misma instancia sigue usando su caché válida
+    // B12: JSON roto
+    http.ok("https://gamebanana.com/apiv11/Mod/9/ProfilePage", "{roto");
+    CatalogDetail d;
+    MCHECK(!gb.detail(9, d, e));
+    // Ficha: archivos sin MD5 válido o con URL ajena se descartan
+    http.ok("https://gamebanana.com/apiv11/Mod/7/ProfilePage", R"({"_idRow":7,"_sName":"Mod 7","_sLicense":"<b>CC BY</b>","_aFiles":[
+        {"_idRow":70,"_sFile":"bueno.zip","_nFilesize":4,"_sMd5Checksum":"5D41402ABC4B2A76B9719D911017C592","_sDownloadUrl":"https://gamebanana.com/dl/70"},
+        {"_idRow":71,"_sFile":"malo.zip","_nFilesize":4,"_sMd5Checksum":"5d41402abc4b2a76b9719d911017c592","_sDownloadUrl":"https://evil.example/dl/71"},
+        {"_idRow":72,"_sFile":"sinmd5.zip","_nFilesize":4,"_sDownloadUrl":"https://gamebanana.com/dl/72"}]})");
+    MCHECK(gb.detail(7, d, e) && d.files.size() == 1 && d.license == "CC BY" && d.files[0].md5 == "5d41402abc4b2a76b9719d911017c592");
+    // Descarga: redirección a files.gamebanana.com permitida; MD5 de "hello" correcto
+    http.redirect("https://gamebanana.com/dl/70", "https://files.gamebanana.com/mods/bueno.zip");
+    http.ok("https://files.gamebanana.com/mods/bueno.zip", "hello");
+    CatalogFile f = d.files[0];
+    f.size = 5;
+    MCHECK(gb.download(f, tmp / "dl" / "a.zip", e) && get(tmp / "dl" / "a.zip") == "hello");
+    // D08: MD5 distinto → se borra
+    http.ok("https://files.gamebanana.com/mods/bueno.zip", "HELLO");
+    MCHECK(!gb.download(f, tmp / "dl" / "b.zip", e) && !fs::exists(tmp / "dl" / "b.zip"));
+    // D11: redirección a un dominio inesperado → rechazada sin pedir ese dominio
+    http.redirect("https://gamebanana.com/dl/70", "https://evil.example/x.zip");
+    size_t before = http.seen.size();
+    MCHECK(!gb.download(f, tmp / "dl" / "c.zip", e) && e.find("no permitido") != std::string::npos);
+    for (size_t i = before; i < http.seen.size(); ++i) MCHECK(http.seen[i].find("evil") == std::string::npos);
+    // Tamaño anunciado enorme → ni se intenta
+    CatalogFile huge = f;
+    huge.size = kMaxModDownload + 1;
+    MCHECK(!gb.download(huge, tmp / "dl" / "d.zip", e));
+    // Más bytes de los anunciados → corte
+    http.redirect("https://gamebanana.com/dl/70", "https://files.gamebanana.com/mods/bueno.zip");
+    http.ok("https://files.gamebanana.com/mods/bueno.zip", std::string(3 << 20, 'x'));
+    MCHECK(!gb.download(f, tmp / "dl" / "e.zip", e));
+    // Árbol del archivo
+    http.ok("https://api.gamebanana.com/Core/Item/Data?itemtype=File&itemid=70&fields=Metadata().aArchiveFilesList()",
+            R"([["Mod/files/opening.bnr","Mod/README.txt"]])");
+    std::vector<std::string> tree;
+    MCHECK(gb.file_tree(70, tree, e) && tree.size() == 2);
+
+    // Comprobación previa solo con nombres
+    Fst fst;
+    MCHECK(parse_fst(make_fst(kDisc), fst, e));
+    const auto& sup = *game_support("wiiparty");
+    MCHECK(quick_check({"Mod/files/opening.bnr", "Mod/LÉEME.txt"}, fst, sup, "SUPP01").verdict == QuickVerdict::Compatible);
+    MCHECK(quick_check({"codes/SUPP01.gct"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
+    MCHECK(quick_check({"x/rel/menu.rel.lz"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
+    MCHECK(quick_check({"riivolution/a.xml", "a/opening.bnr"}, fst, sup, "SUPP01").verdict == QuickVerdict::NeedsDownload);
+    MCHECK(quick_check({"riivolution/a.xml", "setup.exe"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
+    MCHECK(quick_check({"juego.iso"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
+    MCHECK(quick_check({"../evil/opening.bnr"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
+}
+
 }  // namespace
 
 void run_mods_tests() {
@@ -475,5 +580,6 @@ void run_mods_tests() {
     test_fst();
     test_package(tmp);
     test_store(tmp);
+    test_gamebanana(tmp);
     if (failures == before) fs::remove_all(tmp, ec);
 }

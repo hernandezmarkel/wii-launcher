@@ -82,7 +82,8 @@ add_library(wl_mods STATIC
     mods/src/xml.cpp
     mods/src/package.cpp
     mods/src/store.cpp
-    mods/src/launch.cpp)
+    mods/src/launch.cpp
+    mods/src/gamebanana.cpp)
 target_include_directories(wl_mods PUBLIC mods/include)
 target_link_libraries(wl_mods PUBLIC wl_core wl_updater ZLIB::ZLIB)
 target_compile_options(wl_mods PRIVATE -Wall -Wextra)

@@ -70,6 +70,7 @@ struct JsonLimits {
     int max_depth = 16;
     size_t max_string = 64 * 1024;
     size_t max_elements = 20000;    // total de valores en el documento
+    bool allow_fractions = false;   // solo respuestas de proveedores: 1.5 / 1e3 se guardan truncados a entero
 };
 
 // false + error (en español) si no es JSON válido o supera los límites. Solo enteros (sin decimales

@@ -254,7 +254,20 @@ struct Parser {
                 if (++digits > 18) return fail("número demasiado grande");
                 v = v * 10 + static_cast<uint64_t>(t[p++] - '0');
             }
-            if (p < t.size() && (t[p] == '.' || t[p] == 'e' || t[p] == 'E')) return fail("solo se admiten enteros");
+            if (p < t.size() && (t[p] == '.' || t[p] == 'e' || t[p] == 'E')) {
+                if (!lim.allow_fractions) return fail("solo se admiten enteros");
+                if (t[p] == '.') {
+                    ++p;
+                    if (p >= t.size() || t[p] < '0' || t[p] > '9') return fail("número inválido");
+                    while (p < t.size() && t[p] >= '0' && t[p] <= '9') ++p;
+                }
+                if (p < t.size() && (t[p] == 'e' || t[p] == 'E')) {
+                    ++p;
+                    if (p < t.size() && (t[p] == '+' || t[p] == '-')) ++p;
+                    if (p >= t.size() || t[p] < '0' || t[p] > '9') return fail("número inválido");
+                    while (p < t.size() && t[p] >= '0' && t[p] <= '9') ++p;
+                }
+            }
             out = Json(neg ? -static_cast<int64_t>(v) : static_cast<int64_t>(v));
             return true;
         }
