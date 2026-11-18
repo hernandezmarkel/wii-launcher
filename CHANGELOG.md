@@ -13,6 +13,15 @@ solo una etiqueta `vX.Y.Z` aprobada publica algo.
 - Las actualizaciones van firmadas y se verifican antes de instalarse; si algo falla, vuelve sola la versión anterior.
 - Solo se actualiza el launcher: juegos, partidas, salas y ajustes no se tocan.
 
+## [1.0.0-beta.1] - 2026-11-18
+
+- Primera beta con actualizaciones automáticas: para probar en dos o tres PCs antes de la 1.0.0.
+
+- El launcher se actualiza solo: comprueba al abrir (como mucho cada 6 horas) y te avisa sin interrumpir.
+- Nueva sección «Ajustes del launcher»: versión instalada, buscar actualizaciones, novedades y canal beta opcional.
+- Las actualizaciones van firmadas y se verifican antes de instalarse; si algo falla, vuelve sola la versión anterior.
+- Solo se actualiza el launcher: juegos, partidas, salas y ajustes no se tocan.
+
 ## [0.1.0-clase] - 2026-11-18
 
 - Versión repartida en clase en `WiiPorts-clase.zip`, sin actualizaciones automáticas.
