@@ -64,6 +64,8 @@ jobs:
           [ "$built" = "$TAG" ] || { echo "La etiqueta $TAG no coincide con la versión $built de CMakeLists.txt"; exit 1; }
           grep -qx 'testing=OFF' build/updater-build.txt || { echo "WL_UPDATER_TESTING está activado"; exit 1; }
           grep -qx 'override=' build/updater-build.txt || { echo "WL_VERSION_OVERRIDE no está vacío"; exit 1; }
+          anchored=$(sed -n 's/^set(WL_UPDATE_PUBKEY "\([0-9a-f]\{128\}\)".*/\1/p' CMakeLists.txt)
+          grep -qx "pubkey=$anchored" build/updater-build.txt || { echo "La clave pública del build no es la anclada en CMakeLists.txt"; exit 1; }
           bash tools/notas-version.sh "${TAG#v}" > /dev/null
 
       - name: Compilar

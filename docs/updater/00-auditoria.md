@@ -122,6 +122,7 @@ Los ~40 min por port no intervienen: el build del launcher no compila ningún ju
 - **[P1]** Crear el repositorio remoto, su visibilidad (recomendado: público) y la cuenta (`gh` tiene sesión como `MarkelHernandez`).
 - **[P2]** Guardar la clave privada de firma como secreto del repositorio (`WL_UPDATE_SIGNING_KEY`) y una copia de seguridad offline.
 - **[P3]** Autorizar el push de la rama y la primera release (beta y después stable).
+- **[P5]** Licencia del código propio del launcher (no la elijo yo; sin ella el repo público es «todos los derechos reservados»).
 - **[P4]** Firma Authenticode: no hay certificado. Opción gratuita para código abierto: SignPath Foundation (requiere solicitud).
 
 ## 8. Gate de la fase 0

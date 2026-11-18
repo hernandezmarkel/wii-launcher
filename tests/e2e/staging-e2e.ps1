@@ -156,7 +156,8 @@ try {
         @{ Id = "SEC-08"; Name = "Feed comprometido firmado con otra clave"; Key = $OtherKey; Expect = "manifiesto rechazado" },
         @{ Id = "NET-03"; Name = "404 al descargar el exe"; Mut = { param($f, $dl) Set-Content "$f\rules.json" '{"/download/v1.0.1/wii-launcher.exe": {"status": 404}}' -Encoding ascii }; Expect = "descarga no completada" },
         @{ Id = "NET-06"; Name = "Corte a mitad de descarga"; Mut = { param($f, $dl) Set-Content "$f\rules.json" '{"/download/v1.0.1/wii-launcher.exe": {"truncate": 3000000}}' -Encoding ascii }; Expect = "descarga no completada" },
-        @{ Id = "NET-09"; Name = "Redirección a un dominio no permitido"; Mut = { param($f, $dl) Set-Content "$f\rules.json" '{"/download/v1.0.1/wii-launcher.exe": {"redirect": "https://evil.example/wii-launcher.exe"}}' -Encoding ascii }; Expect = "descarga no completada" },
+        @{ Id = "NET-07"; Name = "El servidor entrega un exe más grande que el firmado"; Mut = { param($f, $dl) $b = [IO.File]::ReadAllBytes("$dl\wii-launcher.exe"); [IO.File]::WriteAllBytes("$dl\wii-launcher.exe", $b + (New-Object byte[] 5000000)) }; Expect = "mayor de lo permitido" },
+        @{ Id = "NET-09"; Name ="Redirección a un dominio no permitido"; Mut = { param($f, $dl) Set-Content "$f\rules.json" '{"/download/v1.0.1/wii-launcher.exe": {"redirect": "https://evil.example/wii-launcher.exe"}}' -Encoding ascii }; Expect = "descarga no completada" },
         @{ Id = "NET-04"; Name = "HTTP 429 al comprobar"; Mut = { param($f, $dl) Set-Content "$f\rules.json" '{"/latest/update.txt": {"status": 429, "headers": {"Retry-After": "60"}}}' -Encoding ascii }; Expect = "comprobación manual \(stable\): 3" },
         @{ Id = "NET-05"; Name = "HTTP 500 al comprobar"; Mut = { param($f, $dl) Set-Content "$f\rules.json" '{"/latest/update.txt": {"status": 500}}' -Encoding ascii }; Expect = "comprobación manual \(stable\): 4" },
         @{ Id = "UPD-14"; Name = "Beta publicada como latest, cliente en estable"; Ver = "1.1.0-beta.1"; Channel = "beta"; Expect = "manifiesto rechazado" },
@@ -187,6 +188,26 @@ try {
         Remove-Item Env:\WL_UPDATE_FEED, Env:\WL_LOCALAPPDATA
         $line = ((Log-Text $lad) -split "`n" | Where-Object { $_ -match "comprobación" } | Select-Object -Last 1) -replace "^\S+ \[\d+\] ", ""
         Record "NET-01" "Sin conexión al feed" ($alive -and $line -match ": 4 en") "launcher sigue abierto: $alive; $($line.Trim())"
+    }
+
+    # ---------------- NET-08: descarga lenta; la ventana sigue respondiendo
+    if (Want "NET-08") {
+        $feed = New-Feed "net08" "1.0.1" "$Bin\wii-launcher-1.0.1.exe" $Key "stable" { param($f, $dl) Set-Content "$f\rules.json" '{"/download/v1.0.1/wii-launcher.exe": {"delay_per_chunk": 0.04}}' -Encoding ascii }
+        $s = Start-Feed $feed
+        $inst = New-Install "net08" "$Bin\wii-launcher-1.0.0.exe"; $lad = New-Lad "net08"
+        $env:WL_LOCALAPPDATA = $lad; $env:WL_UPDATE_FEED = $s.Url
+        $p = Start-Process "$inst\wii-launcher.exe" -ArgumentList "--auto-update" -PassThru
+        $samples = 0; $hung = 0
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 60 -and -not ((Journal $lad) -match "state = done")) {
+            Start-Sleep -Milliseconds 300
+            if (-not $p.HasExited) { $p.Refresh(); $samples++; if (-not $p.Responding) { $hung++ } }
+        }
+        $secs = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        Stop-Launchers $inst $lad; Stop-Process $s.Proc -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:\WL_UPDATE_FEED, Env:\WL_LOCALAPPDATA
+        $done = (Journal $lad) -match "state = done"
+        Record "NET-08" "Descarga lenta (~6 s)" ($done -and $hung -eq 0 -and $samples -gt 5) "completa en $secs s; ventana sin responder en $hung de $samples muestras"
     }
 
     # ---------------- recuperación

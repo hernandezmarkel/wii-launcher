@@ -132,7 +132,8 @@ public:
         std::string cl = r.header("content-length");
         if (!cl.empty() && cl.size() < 15 && cl.find_first_not_of("0123456789") == std::string::npos) total = std::stoull(cl);
         if (r.status == 200 && total > req.max_bytes) {
-            r.error = "El archivo es mayor de lo permitido.";
+            r.status = 0;  // se rechaza antes de escribir un solo byte
+            r.error = "El archivo es mayor de lo permitido; no se descarga.";
             close();
             return r;
         }
