@@ -69,7 +69,10 @@ Fecha: 18/11/2026. Entorno: portátil de desarrollo (i5-1334U, 16 GB, Windows 11
 |---|---|---|
 | REP-01 | PASS | `tools/comprobar-publicable.sh`: 0 problemas en los archivos rastreados |
 | REP-02 | PASS | repo nuevo (historial desde el 18/11/2026); `.gitignore` revisado |
-| CI-01..04 | BLOCKED | `ci.yml` escrito (permisos `contents: read`, sin secretos, acciones fijadas por SHA, sin `pull_request_target`). Falta el repo remoto para ejecutarlo |
+| CI-01 | PASS (GitHub real) | runs 44361208172 y 44362072198 en `hernandezmarkel/wii-launcher`: verde en ~4 min (208/208 tests, ZIP de CI 3,5 MB); ninguna release creada |
+| CI-02 | PASS | el CI compila solo el launcher (sin objetivos de juegos); no hubo PR de prueba, se probó con push |
+| CI-03 | PASS (GitHub real) | rama temporal `prueba/ci-test-roto` con `UCHECK(false)`: run 44362072030 en rojo («208/209», paso Tests). Rama borrada después |
+| CI-04 | PASS (configuración) | `permissions: contents: read`, `persist-credentials: false`, sin secretos en CI, solo `pull_request` (nunca `pull_request_target`); el secreto solo existe en el entorno `release` |
 | REL-01..06 | BLOCKED | `release.yml` escrito; probado en local: empaquetado (3,6 MB), firma y verificación con clave de pruebas, rechazo con la clave equivocada, comprobación de clave anclada |
 
 ## Rendimiento
