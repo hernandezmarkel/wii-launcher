@@ -1,0 +1,139 @@
+# Release del launcher. Solo se dispara con una etiqueta vX.Y.Z o vX.Y.Z-beta.N que haya empujado alguien con
+# permiso de escritura. La publicación necesita además la aprobación del entorno «release» (revisor: el propietario)
+# y la crea como BORRADOR: los usuarios no la ven hasta que el propietario la publica a mano en GitHub.
+# Ver docs/updater/04-publicacion.md.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Compilar y empaquetar
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            git zip unzip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Nada no publicable en el repo
+        run: bash tools/comprobar-publicable.sh
+
+      - name: Fuente Inter (hash fijo)
+        run: bash tools/descargar-fuentes.sh "$PWD/_fonts"
+
+      - name: Configurar a partir de la etiqueta
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ver="${TAG#v}"
+          suffix=""
+          case "$ver" in *-*) suffix="${ver#*-}" ;; esac
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWL_UPDATER_TESTING=OFF -DWL_VERSION_OVERRIDE= \
+                -DWL_VERSION_SUFFIX="$suffix" -DWL_INTER_DIR="$PWD/_fonts"
+
+      - name: La etiqueta coincide con la versión de CMakeLists.txt y no es un build de pruebas
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          built="v$(cat build/version.txt)"
+          [ "$built" = "$TAG" ] || { echo "La etiqueta $TAG no coincide con la versión $built de CMakeLists.txt"; exit 1; }
+          grep -qx 'testing=OFF' build/updater-build.txt || { echo "WL_UPDATER_TESTING está activado"; exit 1; }
+          grep -qx 'override=' build/updater-build.txt || { echo "WL_VERSION_OVERRIDE no está vacío"; exit 1; }
+          bash tools/notas-version.sh "${TAG#v}" > /dev/null
+
+      - name: Compilar
+        run: cmake --build build -j 4
+
+      - name: Tests
+        run: ./build/wl_tests.exe
+
+      - name: Empaquetar
+        run: |
+          bash tools/empaquetar.sh build dist
+          cp build/wl_release.exe build/updater-build.txt dist/
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-sin-firmar
+          path: |
+            dist/assets/
+            dist/WiiLauncher-*-actualizacion.zip
+            dist/notas.txt
+            dist/wl_release.exe
+            dist/updater-build.txt
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Firmar y crear la release (borrador)
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 15
+    environment: release   # aprobación manual del propietario antes de que este job vea el secreto
+    permissions:
+      contents: write      # crear la release
+      id-token: write      # attestation de procedencia
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-sin-firmar
+          path: dist
+
+      - name: Firmar el manifiesto y comprobar la firma con la clave anclada
+        shell: bash
+        env:
+          WL_UPDATE_SIGNING_KEY: ${{ secrets.WL_UPDATE_SIGNING_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          [ -n "$WL_UPDATE_SIGNING_KEY" ] || { echo "Falta el secreto WL_UPDATE_SIGNING_KEY en el entorno release"; exit 1; }
+          ./dist/wl_release.exe sign dist/assets/update.txt
+          unset WL_UPDATE_SIGNING_KEY
+          pub=$(sed -n 's/^pubkey=//p' dist/updater-build.txt)
+          ./dist/wl_release.exe verify dist/assets/update.txt dist/assets/update.txt.sig "$pub" 0.0.0 beta
+          (cd dist/assets && sha256sum * > ../SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Attestation de procedencia (qué workflow y commit produjeron cada archivo)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/assets/*
+            dist/WiiLauncher-*-actualizacion.zip
+
+      - name: Crear la release como borrador
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          flags=(--draft --verify-tag --title "Launcher $TAG" --notes-file dist/notas.txt)
+          case "$TAG" in *-beta.*) flags+=(--prerelease) ;; esac  # una beta nunca es «latest»: stable no la ve
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" \
+            dist/assets/* dist/WiiLauncher-*-actualizacion.zip dist/SHA256SUMS.txt
+          echo "Borrador creado. Revísalo y publícalo a mano: solo entonces lo verán los launchers." >> "$GITHUB_STEP_SUMMARY"

@@ -44,6 +44,9 @@ if(WL_VERSION_OVERRIDE)
     set(WL_VERSION_FULL "${WL_VERSION_OVERRIDE}")
 endif()
 configure_file(updater/update_config.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/wl_update_config.h)
+# Para los scripts de empaquetado y release (comprueban versión, modo de pruebas y clave).
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/version.txt "${WL_VERSION_FULL}")
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/updater-build.txt "testing=${WL_UPDATER_TESTING}\noverride=${WL_VERSION_OVERRIDE}\nrepo=${WL_UPDATE_REPO}\npubkey=${WL_UPDATE_PUBKEY}\n")
 add_library(wl_updater STATIC
     updater/src/common.cpp
     updater/src/update_manifest.cpp

@@ -80,7 +80,9 @@ int main(int argc, char** argv) {
         m << "format = 1\napp = " << kAppId << "\nchannel = " << channel << "\nversion = " << version << "\nplatform = " << kPlatform
           << "\npublished = " << stamp << "\n";
         if (argc == 7) {
-            std::istringstream notes(slurp(fs::u8path(argv[6])));
+            std::string raw = slurp(fs::u8path(argv[6]));
+            if (raw.rfind("\xEF\xBB\xBF", 0) == 0) raw.erase(0, 3);  // BOM de PowerShell/Notepad
+            std::istringstream notes(raw);
             std::string line;
             while (std::getline(notes, line)) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();

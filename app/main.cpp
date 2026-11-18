@@ -661,6 +661,7 @@ void launcher_page(App& app, float width) {
         text(g_regular, 13, P.warn, app.update_why_not.c_str(), inner);
     }
     ImGui::Dummy(ImVec2(0, px(6)));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(px(4), px(4)));  // casillas a escala del texto
     ImGui::SetCursorPosX(px(22));
     bool auto_check = u.auto_check;
     if (ImGui::Checkbox("Buscar actualizaciones al abrir (como mucho cada 6 horas)", &auto_check)) app.updates->set_auto(auto_check);
@@ -669,6 +670,7 @@ void launcher_page(App& app, float width) {
     ImGui::BeginDisabled(busy);
     if (ImGui::Checkbox("Recibir versiones beta (para probar novedades; pueden fallar)", &beta)) app.updates->set_channel(beta);
     ImGui::EndDisabled();
+    ImGui::PopStyleVar();
     ImGui::Dummy(ImVec2(0, px(12)));
     ImGui::EndChild();
 
