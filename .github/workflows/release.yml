@@ -79,12 +79,25 @@ jobs:
           bash tools/empaquetar.sh build dist
           cp build/wl_release.exe build/updater-build.txt dist/
 
+      - name: Descargar los instaladores de los juegos (release fijada en packaging/instaladores.lock)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(sed -n 's/^tag=//p' packaging/instaladores.lock)
+          asset=$(sed -n 's/^asset=//p' packaging/instaladores.lock)
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir _instaladores
+
+      - name: Paquete completo (launcher + instaladores + servidor de Mario Kart LAN)
+        run: bash tools/paquete-completo.sh dist _instaladores/$(sed -n 's/^asset=//p' packaging/instaladores.lock)
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-sin-firmar
           path: |
             dist/assets/
             dist/WiiLauncher-*-actualizacion.zip
+            dist/WiiPorts-*.zip
             dist/notas.txt
             dist/wl_release.exe
             dist/updater-build.txt
@@ -119,6 +132,7 @@ jobs:
           pub=$(sed -n 's/^pubkey=//p' dist/updater-build.txt)
           ./dist/wl_release.exe verify dist/assets/update.txt dist/assets/update.txt.sig "$pub" 0.0.0 beta
           (cd dist/assets && sha256sum * > ../SHA256SUMS.txt)
+          (cd dist && sha256sum WiiLauncher-*-actualizacion.zip WiiPorts-*.zip >> SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
 
       - name: Attestation de procedencia (qué workflow y commit produjeron cada archivo)
@@ -127,6 +141,7 @@ jobs:
           subject-path: |
             dist/assets/*
             dist/WiiLauncher-*-actualizacion.zip
+            dist/WiiPorts-*.zip
 
       - name: Crear la release como borrador
         shell: bash
@@ -137,5 +152,5 @@ jobs:
           flags=(--draft --verify-tag --title "Launcher $TAG" --notes-file dist/notas.txt)
           case "$TAG" in *-beta.*) flags+=(--prerelease) ;; esac  # una beta nunca es «latest»: stable no la ve
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" \
-            dist/assets/* dist/WiiLauncher-*-actualizacion.zip dist/SHA256SUMS.txt
+            dist/assets/* dist/WiiLauncher-*-actualizacion.zip dist/WiiPorts-*.zip dist/SHA256SUMS.txt
           echo "Borrador creado. Revísalo y publícalo a mano: solo entonces lo verán los launchers." >> "$GITHUB_STEP_SUMMARY"

@@ -43,7 +43,14 @@ nuevo build): nunca se reutilizan los archivos de la beta.
 |---|---|
 | `update.txt` + `update.txt.sig` | manifiesto firmado que leen los launchers |
 | `wii-launcher.exe`, `manifests.*.toml`, `fonts.*.ttf`, `LEEME.txt`, `LICENCIAS.txt`, `CHANGELOG.md` | archivos sueltos que baja el updater (solo los que cambian) |
-| `WiiLauncher-X.Y.Z-actualizacion.zip` | instalación manual / ZIP puente (≈3,6 MB) |
+| `WiiLauncher-X.Y.Z-actualizacion.zip` | solo el launcher: ZIP puente para quien ya tiene el paquete (≈3,6 MB) |
+| `WiiPorts-X.Y.Z.zip` | **paquete completo para empezar de cero**: launcher + instaladores de los juegos + servidor de Mario Kart LAN (≈400 MB) |
+
+Los instaladores no están en el repo: viven en una release aparte (`instaladores-AAAA-MM-DD`, pre-release y sin «v», así
+que el updater la ignora) fijada por hash en `packaging/instaladores.lock`. Para cambiarlos: preparar la carpeta sin
+`pgdata`, `pgpass.local`, `pg.log`, `run`, `wfc-server/config.xml`, `logs`, `state` ni carpetas `obj`; comprimirla;
+publicarla como nueva pre-release `instaladores-<fecha>`; y actualizar `tag`, `asset` y `sha256` en el `.lock`. El updater
+nunca descarga ni actualiza instaladores: solo viajan en el ZIP completo.
 | `SHA256SUMS.txt` | sumas para comprobar a mano |
 
 Nunca: instaladores de juegos, `servidor-mkw`, discos, claves, `prefs.ini` ni registros (`tools/comprobar-publicable.sh`
