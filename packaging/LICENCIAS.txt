@@ -1,0 +1,12 @@
+Licencias de wii-launcher.exe
+- SDL 3.4.16: zlib. https://github.com/libsdl-org/SDL
+- Dear ImGui 1.92.9b: MIT. https://github.com/ocornut/imgui
+- Fuente Inter 4.1: SIL Open Font License 1.1. https://github.com/rsms/inter
+- Runtime de MinGW-w64 (GCC 15.2): GPL con excepción de biblioteca de runtime de GCC; winpthreads: MIT/BSD.
+
+Los instaladores de Mario Party 9 y Wii Party traen sus licencias en instaladores\licencias.
+El instalador de Mario Kart Wii (WiiCompiled) es GPLv3: ver instaladores\mkwii\src\LICENSE, si existe, o el repo
+https://github.com/patchzyy/Wiicompiled. El servidor (wfc-server) trae su LICENSE en servidor-mkw\wfc-server.
+PostgreSQL: licencia PostgreSQL (servidor-mkw\tools\pgsql).
+
+Ningún archivo de este paquete contiene código ni datos de los juegos de Nintendo.

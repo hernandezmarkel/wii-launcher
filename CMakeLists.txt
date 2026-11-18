@@ -31,11 +31,17 @@ target_link_libraries(wlaunch PRIVATE wl_core)
 set(WL_VERSION_SUFFIX "" CACHE STRING "Sufijo SemVer de pre-release, p. ej. beta.1 (vacío = estable)")
 set(WL_UPDATE_REPO "MarkelHernandez/wii-launcher" CACHE STRING "Repositorio GitHub (dueño/repo) de las Releases del launcher")
 # Clave pública de firma de releases (P-256, X||Y en hex). La privada NUNCA está en el repo.
-set(WL_UPDATE_PUBKEY "@WL_PROD_PUBKEY@" CACHE STRING "Clave pública anclada para verificar actualizaciones")
+# Generada el 18/11/2026 con `wl_release keygen`; rotación en docs/updater/seguridad-y-recuperacion.md.
+set(WL_UPDATE_PUBKEY "21087616d80cdb02bc0d82cdf71e4bdda9317d2c9531bf4b9f2dfbe6dd3e3a55222cee1b2266dddeaf1368bc3357a5d818c02dbde4925657aed177bf50557186" CACHE STRING "Clave pública anclada para verificar actualizaciones")
 option(WL_UPDATER_TESTING "Build de pruebas: feed por http://127.0.0.1 y fallos simulados. Nunca en releases" OFF)
 set(WL_VERSION_FULL "${PROJECT_VERSION}")
 if(WL_VERSION_SUFFIX)
     set(WL_VERSION_FULL "${PROJECT_VERSION}-${WL_VERSION_SUFFIX}")
+endif()
+# Solo para el feed de staging (simular v1.0.0 -> v1.0.1 sin tocar project()). El release lo rechaza.
+set(WL_VERSION_OVERRIDE "" CACHE STRING "Versión completa forzada (solo pruebas)")
+if(WL_VERSION_OVERRIDE)
+    set(WL_VERSION_FULL "${WL_VERSION_OVERRIDE}")
 endif()
 configure_file(updater/update_config.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/wl_update_config.h)
 add_library(wl_updater STATIC

@@ -22,8 +22,10 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 #include "prefs.h"
+#include "update_service.h"
 #include "wl/catalog.h"
 #include "wl/process.h"
+#include "wl/update.h"
 
 using namespace wl;
 using Clock = std::chrono::steady_clock;
@@ -178,7 +180,7 @@ struct Game {
     bool lan_loaded = false;
 };
 
-enum class Page { Game, Room };
+enum class Page { Game, Room, Launcher };
 
 struct App {
     std::vector<std::unique_ptr<Game>> games;
@@ -195,6 +197,13 @@ struct App {
     std::string room_error;
     std::vector<std::string> addresses;
     std::atomic<int> pending{0};  // trabajos de fondo que piden redibujar
+    // Autoactualización del launcher (solo el launcher; nunca los juegos).
+    std::unique_ptr<UpdateService> updates;
+    bool update_later = false;      // «Más tarde»: no se vuelve a mostrar el aviso en esta sesión
+    std::string update_notice;      // resultado de una actualización anterior (éxito, fallo o recuperación)
+    bool update_notice_bad = false;
+    std::string update_why_not;     // por qué no se puede aplicar ahora
+    bool quit_for_update = false;
 };
 
 App* g_app = nullptr;
@@ -288,7 +297,7 @@ void sidebar(App& app, float height) {
         bool selected = (int)i == app.selected;
         ImGui::PushStyleColor(ImGuiCol_Header, v4(P.card));
         if (ImGui::Selectable("##game", selected, ImGuiSelectableFlags_None, ImVec2(px(256), px(60)))) {
-            if (app.selected != (int)i) app.page = Page::Game;
+            if (app.selected != (int)i || app.page == Page::Launcher) app.page = Page::Game;
             app.selected = (int)i;
             app.prefs.set("selected", g.manifest.game_id);
         }
@@ -320,8 +329,29 @@ void sidebar(App& app, float height) {
         ImGui::PopFont();
         ImGui::PopID();
     }
-    ImGui::SetCursorPos(ImVec2(px(24), height - px(58)));
-    text(g_regular, 11.5f, P.faint, "Sin servidores: el online es directo,\npor LAN o por una VPN como Hamachi.");
+    // Pie: versión del launcher y acceso a sus ajustes. Si hay versión nueva, un aviso discreto.
+    UpdateSnapshot u = app.updates ? app.updates->snapshot() : UpdateSnapshot{};
+    bool news = u.state == UpdState::Available || u.state == UpdState::Downloading || u.state == UpdState::Verifying || u.state == UpdState::Ready;
+    ImGui::SetCursorPos(ImVec2(px(12), height - px(news ? 112 : 84)));
+    ImGui::PushStyleColor(ImGuiCol_Header, v4(P.card));
+    ImGui::BeginDisabled(app.page == Page::Room);  // la sala se cierra con sus propios botones
+    if (news) {
+        ImGui::PushStyleColor(ImGuiCol_Text, v4(P.accent));
+        ImGui::PushFont(g_semibold, 13.0f);
+        std::string label = (u.state == UpdState::Ready ? "Lista para instalar: v" : "Actualización disponible: v") + u.available + "##upd";
+        if (ImGui::Selectable(label.c_str(), app.page == Page::Launcher, ImGuiSelectableFlags_None, ImVec2(px(256), px(24)))) app.page = Page::Launcher;
+        ImGui::PopFont();
+        ImGui::PopStyleColor();
+        ImGui::SetCursorPosX(px(12));
+    }
+    ImGui::PushFont(g_regular, 13.0f);
+    if (ImGui::Selectable("Ajustes del launcher##launcher", app.page == Page::Launcher, ImGuiSelectableFlags_None, ImVec2(px(256), px(24))))
+        app.page = Page::Launcher;
+    ImGui::PopFont();
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor();
+    ImGui::SetCursorPosX(px(24));
+    text(g_regular, 11.5f, P.faint, ("Launcher v" + upd::current_version() + " · online directo, sin servidores").c_str());
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
@@ -498,6 +528,166 @@ void lan_wfc_card(App& app, Game& g, const InstallStatus& s, float width) {
     text(g_regular, 12, P.faint, "En el juego: F10 > Controller settings > Player 1 para elegir teclado o mando. Luego Nintendo WFC > 1 jugador > Permit.", inner);
     ImGui::Dummy(ImVec2(0, px(10)));
     ImGui::EndChild();
+}
+
+// ---------------------------------------------------------------- actualizaciones del launcher
+
+bool any_game_running(const App& app) {
+    for (const auto& g : app.games)
+        if (g->running_pid.load() != 0) return true;
+    return false;
+}
+
+std::string size_text(uint64_t bytes) {
+    char buf[32];
+    if (bytes < 1024 * 1024) std::snprintf(buf, sizeof buf, "%.0f KB", bytes / 1024.0);
+    else std::snprintf(buf, sizeof buf, "%.1f MB", bytes / (1024.0 * 1024.0));
+    return buf;
+}
+
+void try_apply(App& app) {
+    app.update_why_not.clear();
+    if (app.updates->apply(any_game_running(app), app.update_why_not)) app.quit_for_update = true;
+}
+
+// Aviso discreto abajo a la derecha cuando hay versión nueva. No bloquea nada; «Más tarde» lo oculta en esta sesión.
+void update_toast(App& app, const ImVec2& display) {
+    if (!app.updates || app.update_later || app.page == Page::Launcher) return;
+    UpdateSnapshot u = app.updates->snapshot();
+    if (u.state != UpdState::Available && u.state != UpdState::Ready) return;
+    ImGui::SetNextWindowPos(ImVec2(display.x - px(24), display.y - px(24)), ImGuiCond_Always, ImVec2(1, 1));
+    ImGui::SetNextWindowSize(ImVec2(px(400), 0));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, v4(P.card));
+    ImGui::PushStyleColor(ImGuiCol_Border, v4(P.accent));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(18), px(16)));
+    ImGui::Begin("##update_toast", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+    bool ready = u.state == UpdState::Ready;
+    text(g_semibold, 15, P.text, ((ready ? "Actualización lista — v" : "Nueva versión disponible — v") + u.available).c_str());
+    std::string line = u.notes.empty() ? std::string("Mejoras del launcher.") : u.notes[0];
+    if (u.notes.size() > 1) line += " (+" + std::to_string(u.notes.size() - 1) + ")";
+    text(g_regular, 13, P.dim, line.c_str(), px(360));
+    text(g_regular, 12, P.faint, ready ? "Se instala al reiniciar el launcher. Tus juegos y ajustes no se tocan."
+                                       : ("Descarga: " + size_text(u.download_size) + ". Solo el launcher; tus juegos y ajustes no se tocan.").c_str(),
+         px(360));
+    ImGui::Dummy(ImVec2(0, px(2)));
+    if (ready) {
+        if (button("Reiniciar y actualizar", Btn::Primary, true, px(200))) try_apply(app);
+    } else if (button("Actualizar", Btn::Primary, true, px(130))) {
+        app.updates->download();
+    }
+    ImGui::SameLine();
+    if (button("Más tarde", Btn::Secondary, true, px(110))) app.update_later = true;
+    ImGui::SameLine();
+    if (button("Novedades", Btn::Ghost, true, px(110))) app.page = Page::Launcher;
+    if (!app.update_why_not.empty()) text(g_regular, 12.5f, P.warn, app.update_why_not.c_str(), px(360));
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+}
+
+// Ajustes del launcher: versión, canal, comprobar, novedades, progreso y errores.
+void launcher_page(App& app, float width) {
+    float x0 = ImGui::GetCursorPosX();
+    ImGui::SetCursorPos(ImVec2(x0, px(34)));
+    text(g_semibold, 30, P.text, "Ajustes del launcher");
+    ImGui::SetCursorPosX(x0);
+    text(g_regular, 13.5f, P.dim, "Las actualizaciones solo cambian el launcher. Tus juegos, partidas, salas y ajustes no se tocan, y nada se instala sin tu permiso.", width);
+    ImGui::Dummy(ImVec2(0, px(10)));
+    if (!app.update_notice.empty()) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 14, app.update_notice_bad ? P.warn : P.ok, app.update_notice.c_str(), width);
+        ImGui::Dummy(ImVec2(0, px(6)));
+    }
+    if (!app.updates) return;
+    UpdateSnapshot u = app.updates->snapshot();
+
+    ImGui::SetCursorPosX(x0);
+    ImGui::BeginChild("##updates", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoScrollbar);
+    float inner = width - px(44);
+    ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+    text(g_semibold, 15, P.text, "Actualizaciones");
+    ImGui::Dummy(ImVec2(0, px(2)));
+    info_row("Versión instalada", "v" + u.installed, P.text);
+    info_row("Canal", u.channel == "beta" ? "Beta (pruebas)" : "Estable", P.text);
+    info_row("Última comprobación", u.last_check.empty() ? "—" : u.last_check, P.dim);
+
+    // Estado
+    std::string status;
+    ImU32 color = P.dim;
+    switch (u.state) {
+        case UpdState::Idle: status = u.enabled ? "Sin comprobar todavía." : u.info; break;
+        case UpdState::Checking: status = "Buscando actualizaciones…"; break;
+        case UpdState::UpToDate: status = u.info.empty() ? "Estás al día." : u.info; color = P.ok; break;
+        case UpdState::Available: status = "Hay una versión nueva: v" + u.available + (u.published.empty() ? "" : " (" + u.published + ")"); color = P.accent; break;
+        case UpdState::Downloading: status = "Descargando… " + size_text(u.done) + " de " + size_text(u.total); color = P.accent; break;
+        case UpdState::Verifying: status = "Comprobando la firma y los archivos…"; color = P.accent; break;
+        case UpdState::Ready: status = "v" + u.available + " descargada y verificada. Se instala al reiniciar el launcher."; color = P.ok; break;
+        case UpdState::Installing: status = "Cerrando el launcher para instalar…"; color = P.accent; break;
+        case UpdState::Error: status = "No se pudo completar: " + u.error + " Puedes seguir jugando."; color = P.warn; break;
+    }
+    ImGui::Dummy(ImVec2(0, px(4)));
+    ImGui::SetCursorPosX(px(22));
+    text(g_regular, 14, color, status.c_str(), inner);
+    if (u.state == UpdState::Available && !u.info.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 12.5f, P.faint, u.info.c_str(), inner);
+    }
+    if (u.state == UpdState::Downloading) {
+        ImGui::SetCursorPosX(px(22));
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, v4(P.accent));
+        ImGui::ProgressBar(u.total ? (float)((double)u.done / (double)u.total) : 0.0f, ImVec2(inner, px(8)), "");
+        ImGui::PopStyleColor();
+    }
+    ImGui::Dummy(ImVec2(0, px(4)));
+    ImGui::SetCursorPosX(px(22));
+    bool busy = u.state == UpdState::Checking || u.state == UpdState::Downloading || u.state == UpdState::Verifying || u.state == UpdState::Installing;
+    if (u.state == UpdState::Available) {
+        if (button("Actualizar", Btn::Primary, true, px(140))) app.updates->download();
+        ImGui::SameLine();
+        text(g_regular, 12.5f, P.faint, ("Descarga " + size_text(u.download_size) + " (versión completa " + size_text(u.update_size) + ")").c_str());
+    } else if (u.state == UpdState::Downloading) {
+        if (button("Cancelar", Btn::Secondary, true, px(140))) app.updates->cancel();
+    } else if (u.state == UpdState::Ready) {
+        bool running = any_game_running(app);
+        if (button("Reiniciar y actualizar", Btn::Primary, !running, px(220), "Cierra el juego antes: no se reinicia el launcher a mitad de partida.")) try_apply(app);
+    } else {
+        const char* label = u.state == UpdState::Error ? "Reintentar" : "Buscar actualizaciones";
+        if (button(label, Btn::Secondary, u.enabled && !busy, px(210), u.enabled ? "Espera a que termine." : "Esta copia no tiene actualizaciones configuradas.")) app.updates->check_now();
+    }
+    if (!app.update_why_not.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13, P.warn, app.update_why_not.c_str(), inner);
+    }
+    ImGui::Dummy(ImVec2(0, px(6)));
+    ImGui::SetCursorPosX(px(22));
+    bool auto_check = u.auto_check;
+    if (ImGui::Checkbox("Buscar actualizaciones al abrir (como mucho cada 6 horas)", &auto_check)) app.updates->set_auto(auto_check);
+    ImGui::SetCursorPosX(px(22));
+    bool beta = u.channel == "beta";
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Checkbox("Recibir versiones beta (para probar novedades; pueden fallar)", &beta)) app.updates->set_channel(beta);
+    ImGui::EndDisabled();
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+
+    if (!u.notes.empty() && !u.available.empty() && u.state != UpdState::UpToDate) {
+        ImGui::Dummy(ImVec2(0, px(10)));
+        ImGui::SetCursorPosX(x0);
+        ImGui::BeginChild("##notes", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoScrollbar);
+        ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+        text(g_semibold, 15, P.text, ("Novedades de la v" + u.available).c_str());
+        for (const auto& n : u.notes) {
+            ImGui::SetCursorPosX(px(22));
+            text(g_regular, 13.5f, P.dim, ("•  " + n).c_str(), inner);
+        }
+        ImGui::Dummy(ImVec2(0, px(12)));
+        ImGui::EndChild();
+    }
+    ImGui::Dummy(ImVec2(0, px(10)));
+    ImGui::SetCursorPosX(x0);
+    text(g_regular, 12, P.faint, "Si algo falla, el launcher vuelve solo a la versión anterior. Registro: %LOCALAPPDATA%\\WiiLauncher\\updater.log", width);
 }
 
 void game_page(App& app, Game& g, float width) {
@@ -799,11 +989,32 @@ int main(int argc, char** argv) {
     std::string screenshot;
     int select = -1;
     bool host_now = false;
+    std::string post_update_journal, update_failed;
+    bool auto_update = false, open_settings = false;
+    // Modo aplicador: esta copia del exe sustituye los archivos del launcher y no abre ventana.
+    if (argc > 1 && !std::strcmp(argv[1], "--apply-update")) {
+        upd::ApplyArgs a;
+        for (int i = 1; i + 1 < argc; i += 2) {
+            std::string k = argv[i], v = argv[i + 1];
+            if (k == "--apply-update") a.staging = fs::u8path(v);
+            else if (k == "--target") a.target = fs::u8path(v);
+            else if (k == "--journal") a.journal = fs::u8path(v);
+            else if (k == "--wait-pid") a.wait_pid = std::strtoul(v.c_str(), nullptr, 10);
+        }
+        if (upd::testing_build())
+            if (const char* t = SDL_getenv("WL_UPDATER_HEALTH_MS")) a.health_timeout_ms = std::atoi(t);
+        if (a.staging.empty() || a.target.empty() || a.journal.empty()) return 2;
+        return upd::run_apply(a);
+    }
     for (int i = 1; i < argc; ++i) {
-        if (!std::strcmp(argv[i], "--manifests") && i + 1 < argc) manifests = argv[++i];
+        if (!std::strcmp(argv[i], "--post-update") && i + 1 < argc) post_update_journal = argv[++i];
+        else if (!std::strcmp(argv[i], "--update-failed") && i + 1 < argc) update_failed = argv[++i];
+        else if (!std::strcmp(argv[i], "--auto-update") && upd::testing_build()) auto_update = true;  // pruebas automáticas
+        else if (!std::strcmp(argv[i], "--manifests") && i + 1 < argc) manifests = argv[++i];
         else if (!std::strcmp(argv[i], "--screenshot") && i + 1 < argc) screenshot = argv[++i];
         else if (!std::strcmp(argv[i], "--select") && i + 1 < argc) select = std::atoi(argv[++i]);
-        else if (!std::strcmp(argv[i], "--host")) host_now = true;  // abre la sala del juego elegido (pruebas)
+        else if (!std::strcmp(argv[i], "--host")) host_now = true;
+        else if (!std::strcmp(argv[i], "--launcher-settings")) open_settings = true;  // abre Ajustes del launcher (pruebas y capturas)  // abre la sala del juego elegido (pruebas)
     }
     // Junto al exe hay una carpeta manifests/ en la versión instalable; en desarrollo se usa la del repo.
     if (const char* base = SDL_GetBasePath()) {
@@ -811,6 +1022,17 @@ int main(int argc, char** argv) {
         fs::path local = fs::u8path(base) / "manifests";
         std::error_code e;
         if (fs::is_directory(local, e)) manifests = local.u8string();
+    }
+    // Una actualización que se cortó (apagón, cierre forzado): se deshace antes de abrir nada y se reabre la versión restaurada.
+    if (post_update_journal.empty() && update_failed.empty()) {
+        std::string recovered = upd::recover_interrupted_update();
+        if (!recovered.empty() && !g_base.empty()) {
+            LaunchSpec again;
+            again.executable = g_base / "wii-launcher.exe";
+            again.working_dir = g_base;
+            again.args = {"--update-failed", "recuperado"};
+            if (spawn(again).ok) return 0;
+        }
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD)) {
@@ -875,11 +1097,38 @@ int main(int argc, char** argv) {
     app.start_option = std::atoi(app.prefs.get("online_stability", "1").c_str());
     for (auto& g : app.games) probe(*g);  // en segundo plano: la ventana aparece sin esperar al disco
 
+    // Autoactualización: estado, mensajes de una actualización anterior y comprobación en segundo plano.
+    app.updates = std::make_unique<UpdateService>(app.prefs, g_base, [] { wake(); });
+    {
+        std::string from = app.prefs.get("update.from_version");
+        if (!update_failed.empty()) {
+            static const std::pair<const char*, const char*> reasons[] = {
+                {"otra-ventana", "había otra ventana del launcher abierta"}, {"verificacion", "los archivos descargados no pasaron la verificación"},
+                {"permisos", "la carpeta del launcher no permite escribir"}, {"espacio", "no hay espacio libre suficiente"},
+                {"incompleta", "faltaban archivos de la actualización"}, {"instalacion", "Windows o el antivirus bloquearon un archivo"},
+                {"arranque", "la versión nueva no arrancó bien"}, {"recuperado", "se interrumpió a mitad (cierre o apagón)"}};
+            std::string why = update_failed;
+            for (const auto& [k, t] : reasons)
+                if (update_failed == k) why = t;
+            app.update_notice = "La actualización no se instaló: " + why + ". Sigues en la versión v" + upd::current_version() + ", que funciona como antes.";
+            app.update_notice_bad = true;
+            app.page = Page::Launcher;
+        } else if (!from.empty() && from != upd::current_version()) {
+            app.update_notice = "Actualizado de v" + from + " a v" + upd::current_version() + ".";
+            app.prefs.set("update.from_version", "");
+            app.page = Page::Launcher;
+        }
+        if (!update_failed.empty()) app.prefs.set("update.from_version", "");
+        if (open_settings) app.page = Page::Launcher;
+    }
+
     if (host_now && app.games[app.selected]->adapter) {
         for (int i = 0; i < 200 && !app.games[app.selected]->probed; ++i) SDL_Delay(5);
         if (app.games[app.selected]->adapter->make_room()) open_room(app, true);
     }
     SDL_ShowWindow(window);
+    if (screenshot.empty() && post_update_journal.empty() && !auto_update) app.updates->start_auto();  // hilo aparte: no retrasa la ventana
+    if (auto_update) app.updates->check_now();
     bool first_frame = true;
     int frames = 0;
     bool quit = false;
@@ -906,6 +1155,18 @@ int main(int argc, char** argv) {
             }
             redraw = std::max(redraw, 1);
         }
+        app.updates->pump();
+        {
+            UpdateSnapshot us = app.updates->snapshot();
+            if (us.state == UpdState::Downloading || us.state == UpdState::Verifying) redraw = std::max(redraw, 1);  // progreso
+            if (auto_update && us.state == UpdState::Available) app.updates->download();
+            if (auto_update && us.state == UpdState::Ready) {
+                try_apply(app);
+                if (!app.quit_for_update) auto_update = false;  // pospuesta: no se insiste en cada fotograma
+            }
+            if (auto_update && (us.state == UpdState::Error || us.state == UpdState::UpToDate)) auto_update = false;
+        }
+        if (app.quit_for_update) break;  // el aplicador espera a que este proceso termine
         if (redraw <= 0 && screenshot.empty()) continue;
         redraw--;
 
@@ -927,6 +1188,8 @@ int main(int argc, char** argv) {
             text(g_semibold, 20, P.text, "No hay juegos en el catálogo.");
         } else if (app.page == Page::Room && app.room_game >= 0) {
             room_page(app, width);
+        } else if (app.page == Page::Launcher) {
+            launcher_page(app, width);
         } else {
             game_page(app, *app.games[app.selected], width);
         }
@@ -941,6 +1204,7 @@ int main(int argc, char** argv) {
             if (ImGui::IsKeyPressed(ImGuiKey_PageUp)) app.selected = std::max(app.selected - 1, 0);
         }
         ImGui::End();
+        update_toast(app, io.DisplaySize);
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 16, 18, 24, 255);
         SDL_RenderClear(renderer);
@@ -959,6 +1223,8 @@ int main(int argc, char** argv) {
             std::error_code e;
             fs::create_directories(local_app_data() / "WiiLauncher", e);
             std::ofstream(local_app_data() / "WiiLauncher" / "metricas.txt", std::ios::app) << "primer_fotograma_ms=" << ms << "\n";
+            // Versión recién instalada: avisa al aplicador de que arranca bien (si no, deshace la actualización).
+            if (!post_update_journal.empty()) upd::report_health(fs::u8path(post_update_journal));
         }
         // Mientras alguna comprobación sigue en marcha, otro fotograma cuando termine (wake()).
     }

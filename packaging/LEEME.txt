@@ -1,0 +1,46 @@
+WII PORTS - paquete para jugar en clase
+=======================================
+
+Qué hay
+-------
+- wii-launcher.exe: un solo launcher para Mario Party 9, Wii Party y Mario Kart Wii (beta).
+- instaladores\: los instaladores de cada juego. Ninguno trae el juego: lo compilan en tu PC a partir
+  de TU PROPIA copia del disco.
+- servidor-mkw\: servidor de Mario Kart Wii para la LAN. Solo lo usa el anfitrión.
+
+No hay ROMs en este paquete. Cada uno necesita su propia copia del juego (ISO o WBFS).
+
+Primeros pasos
+--------------
+1. Descomprime TODA la carpeta en tu disco, por ejemplo en el Escritorio. No la abras desde el zip
+   ni desde el USB.
+2. Abre wii-launcher.exe.
+3. Elige un juego y pulsa "Instalar o actualizar". Se abre su instalador: elige tu disco y espera.
+   La primera vez tarda entre 25 y 35 minutos por juego. Cuando acabe, pulsa "Volver a comprobar".
+4. Pulsa "Jugar".
+
+Mario Party 9 y Wii Party (online por LAN o Hamachi)
+----------------------------------------------------
+- Uno pulsa "Crear sala" y los demás "Unirse" con la IP que le aparece al anfitrión.
+- Todos tenéis que haber instalado con ESTE MISMO paquete (misma versión del juego).
+- Windows puede preguntar por el cortafuegos: pulsa "Permitir" (red privada).
+
+Mario Kart Wii (BETA, puede fallar)
+-----------------------------------
+- Hace falta la MISMA región del disco en todos (por ejemplo, todos NTSC-U / USA).
+- Hacen falta unos 12 GB libres para instalarlo.
+- El anfitrión pulsa "Soy el anfitrión: arrancar servidor" en la ficha de Mario Kart Wii. Se abre una
+  ventana que dice "Servidor LAN en marcha en <IP>". No la cierres mientras jugáis.
+- Los demás escriben esa IP en "IP del anfitrión" y pulsan "Guardar". El anfitrión ya la tiene puesta.
+- En el juego: F10 > Controller settings > Player 1 > teclado o mando.
+  Después: Nintendo WFC > 1 jugador > Siguiente > Siguiente > Permit.
+- Cortafuegos: el anfitrión tiene que permitir wwfc-lan.exe, y todos WiiCompiled.exe, cuando Windows
+  pregunte (red privada). No desactives el cortafuegos.
+- NUNCA copies la carpeta UserData de un PC a otro: guarda la identidad de tu consola.
+- Estado real: se ha probado entrar al menú online en un PC. Una carrera entre dos PCs todavía no se
+  ha probado. Si falla, el modo sin online sigue funcionando ("Jugar sin online").
+
+Si algo falla
+-------------
+- Pulsa "Volver a comprobar" en la ficha del juego: te dice qué falta.
+- Mario Kart Wii: el registro del servidor está en servidor-mkw\run\server-stdout.log.
