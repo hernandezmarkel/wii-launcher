@@ -15,6 +15,7 @@
 #include "wl/mods/json.h"
 #include "wl/mods/package.h"
 #include "wl/mods/safe_path.h"
+#include "wl/mods/session.h"
 #include "wl/mods/store.h"
 #include "wl/mods/zip.h"
 #include "wl/update.h"
@@ -567,6 +568,113 @@ void test_gamebanana(const fs::path& tmp) {
     MCHECK(quick_check({"../evil/opening.bnr"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
 }
 
+void test_session(const fs::path& tmp) {
+    fs::path disc = tmp / "s-juego" / "extracted";
+    make_disc(disc, kDisc);
+    ModStore host("wiiparty", tmp / "s-host", disc), guest("wiiparty", tmp / "s-guest", disc);
+    std::string e;
+    MCHECK(host.open(e) && guest.open(e));
+    write_zip(tmp / "sa.zip", {{"files/opening.bnr", "A"}});
+    write_zip(tmp / "sb.zip", {{"files/menu/title_bg.brres.lz", "B"}});
+    write_zip(tmp / "sb2.zip", {{"files/menu/title_bg.brres.lz", "B-distinto"}});
+    write_zip(tmp / "sx.zip", {{"files/locale/sp_EU/mess.bin", "X"}});
+    ModMeta a, b, x;
+    a.id = "gamebanana.111"; a.name = "A"; a.version = "1.0"; a.provider = "gamebanana"; a.source_id = "111";
+    b.id = "local.b"; b.name = "B"; b.version = "1.0";
+    x.id = "local.x"; x.name = "X"; x.version = "1.0";
+    InstalledMod ha, hb, ga, gb, gb2, gx;
+    MCHECK(host.install(tmp / "sa.zip", a, ha, e) && host.install(tmp / "sb.zip", b, hb, e));
+    Profile hp;
+    hp.mods = {{ha.id(), ha.key, true, {}}, {hb.id(), hb.key, true, {}}};
+    Json mj = build_session_manifest(host, hp, "sala-1", 3);
+    SessionManifest m;
+    MCHECK(parse_session_manifest(mj.dump(), m, e));
+    MCHECK(m.mods.size() == 2 && m.fingerprint == host.compute(hp).fingerprint && m.revision == 3);
+
+    // C04/C05: al invitado le falta todo; A se puede pedir a GameBanana, B (importado a mano) no.
+    Profile gp;
+    SessionDiff d = diff_session(guest, gp, m);
+    MCHECK(d.game_ok && !d.compatible && d.missing == 2 && d.items.size() == 2);
+    MCHECK(d.items[0].state == ModDiff::Missing && d.items[0].downloadable);
+    MCHECK(d.items[1].state == ModDiff::NoAuthorizedSource && !d.items[1].downloadable);
+    MCHECK(!d.session_ready);
+    // Con los dos instalados pero desactivados (C08) y uno extra activo (C07): el perfil de sesión lo arregla.
+    MCHECK(guest.install(tmp / "sa.zip", a, ga, e) && guest.install(tmp / "sb.zip", b, gb, e) && guest.install(tmp / "sx.zip", x, gx, e));
+    gp.mods = {{gx.id(), gx.key, true, {}}, {ga.id(), ga.key, false, {}}, {gb.id(), gb.key, false, {}}};
+    d = diff_session(guest, gp, m);
+    MCHECK(!d.compatible && d.disabled == 2 && d.extra == 1 && d.session_ready);
+    MCHECK(guest.compute(d.session_profile).fingerprint == m.fingerprint);
+    // C01: idéntico
+    gp.mods = {{ga.id(), ga.key, true, {}}, {gb.id(), gb.key, true, {}}};
+    d = diff_session(guest, gp, m);
+    MCHECK(d.compatible && d.items[0].state == ModDiff::ExactMatch && d.items[1].state == ModDiff::ExactMatch);
+    // C09: orden distinto
+    gp.mods = {{gb.id(), gb.key, true, {}}, {ga.id(), ga.key, true, {}}};
+    d = diff_session(guest, gp, m);
+    MCHECK(!d.compatible && d.items[0].state == ModDiff::LoadOrder && d.session_ready);
+    // C10: misma lista con otras opciones
+    gp.mods = {{ga.id(), ga.key, true, {{"Pack/Texto", 2}}}, {gb.id(), gb.key, true, {}}};
+    d = diff_session(guest, gp, m);
+    MCHECK(!d.compatible && d.items[0].state == ModDiff::ConfigMismatch);
+    // C06: mismo id y versión, contenido distinto
+    ModStore guest2("wiiparty", tmp / "s-guest2", disc);
+    MCHECK(guest2.open(e));
+    InstalledMod g2a, g2b;
+    MCHECK(guest2.install(tmp / "sa.zip", a, g2a, e) && guest2.install(tmp / "sb2.zip", b, g2b, e));
+    Profile g2p;
+    g2p.mods = {{g2a.id(), g2a.key, true, {}}, {g2b.id(), g2b.key, true, {}}};
+    d = diff_session(guest2, g2p, m);
+    MCHECK(!d.compatible && d.items[1].state == ModDiff::WrongHash && !d.session_ready);
+    // C02: otro disco base
+    SessionManifest other = m;
+    other.base_content_id = "SUPE01:0000000000000000";
+    d = diff_session(guest, gp, other);
+    MCHECK(!d.game_ok && d.items.size() == 1 && d.items[0].state == ModDiff::IncompatibleGame);
+    // Vanilla con vanilla
+    Json vj = build_session_manifest(host, Profile{}, "sala-2", 1);
+    SessionManifest vm;
+    MCHECK(parse_session_manifest(vj.dump(), vm, e) && vm.fingerprint == kVanilla);
+    MCHECK(diff_session(guest, Profile{}, vm).compatible);
+
+    // D06/D07/D13: manifiestos hostiles
+    auto hostile = [&](const std::string& field, Json value) {
+        Json bad = mj;
+        Json mods = Json::array();
+        Json first = mj["mods"][0];
+        first.set(field, value);
+        mods.push(first);
+        bad.set("mods", mods);
+        SessionManifest out;
+        std::string err;
+        return parse_session_manifest(bad.dump(), out, err);
+    };
+    MCHECK(!hostile("id", Json("../../launcher")));
+    MCHECK(!hostile("id", Json("A.Mayus")));
+    MCHECK(!hostile("effective_content_sha256", Json("no-es-hex")));
+    MCHECK(!hostile("load_order", Json(-1)));
+    {
+        // Una URL o ruta en el manifiesto no se usa para nada: source desconocido → no descargable.
+        Json bad = mj;
+        Json mods = Json::array();
+        Json first = mj["mods"][0];
+        first.set("source", "file:///C:/Windows/System32");
+        first.set("download_url", "http://192.168.1.10/virus.zip");
+        mods.push(first);
+        bad.set("mods", mods);
+        SessionManifest out;
+        MCHECK(parse_session_manifest(bad.dump(), out, e) && out.mods[0].source == "desconocido");
+        SessionDiff dd = diff_session(guest2, Profile{}, out);
+        MCHECK(!dd.items[0].downloadable);
+    }
+    std::string huge = "{\"protocol\":\"launcher-lobby-mods\",\"x\":\"" + std::string(70000, 'a') + "\"}";
+    SessionManifest hm;
+    MCHECK(!parse_session_manifest(huge, hm, e));
+    MCHECK(!parse_session_manifest("[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]", hm, e));
+    Json wrong = mj;
+    wrong.set("protocol_version", 99);
+    MCHECK(!parse_session_manifest(wrong.dump(), hm, e));   // C24: protocolo distinto → no se acepta
+}
+
 }  // namespace
 
 void run_mods_tests() {
@@ -582,5 +690,6 @@ void run_mods_tests() {
     test_package(tmp);
     test_store(tmp);
     test_gamebanana(tmp);
+    test_session(tmp);
     if (failures == before) fs::remove_all(tmp, ec);
 }
