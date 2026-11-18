@@ -1,0 +1,6 @@
+#pragma once
+// Generado por CMake (updater/update_config.h.in). No editar a mano.
+#define WL_VERSION "@WL_VERSION_FULL@"
+#define WL_UPDATE_REPO "@WL_UPDATE_REPO@"
+#define WL_UPDATE_PUBKEY "@WL_UPDATE_PUBKEY@"
+#cmakedefine01 WL_UPDATER_TESTING

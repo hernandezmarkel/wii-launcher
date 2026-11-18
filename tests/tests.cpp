@@ -14,7 +14,8 @@
 
 using namespace wl;
 
-static int failures = 0, checks = 0;
+int failures = 0, checks = 0;  // compartidos con updater_tests.cpp
+void run_updater_tests();
 #define CHECK(x)                                                                 \
     do {                                                                         \
         ++checks;                                                                \
@@ -323,6 +324,9 @@ int main() {
     CHECK(!spawn(missing).ok);
 #endif
     fs::remove_all(lad);
+#ifdef _WIN32
+    run_updater_tests();
+#endif
     std::cout << (checks - failures) << "/" << checks << " comprobaciones correctas\n";
     return failures ? 1 : 0;
 }

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(wii_launcher CXX)
+# La versión del launcher vive aquí (y en CHANGELOG.md). El workflow de release exige que coincida con la etiqueta.
+project(wii_launcher VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -26,9 +27,37 @@ target_compile_definitions(wl_core PUBLIC WL_MANIFEST_DIR="${CMAKE_CURRENT_SOURC
 add_executable(wlaunch tools/wlaunch.cpp)
 target_link_libraries(wlaunch PRIVATE wl_core)
 
+# ---- Autoactualización del launcher (docs/updater/02-adr-arquitectura.md). Solo Windows: WinHTTP + CNG.
+set(WL_VERSION_SUFFIX "" CACHE STRING "Sufijo SemVer de pre-release, p. ej. beta.1 (vacío = estable)")
+set(WL_UPDATE_REPO "MarkelHernandez/wii-launcher" CACHE STRING "Repositorio GitHub (dueño/repo) de las Releases del launcher")
+# Clave pública de firma de releases (P-256, X||Y en hex). La privada NUNCA está en el repo.
+set(WL_UPDATE_PUBKEY "@WL_PROD_PUBKEY@" CACHE STRING "Clave pública anclada para verificar actualizaciones")
+option(WL_UPDATER_TESTING "Build de pruebas: feed por http://127.0.0.1 y fallos simulados. Nunca en releases" OFF)
+set(WL_VERSION_FULL "${PROJECT_VERSION}")
+if(WL_VERSION_SUFFIX)
+    set(WL_VERSION_FULL "${PROJECT_VERSION}-${WL_VERSION_SUFFIX}")
+endif()
+configure_file(updater/update_config.h.in ${CMAKE_CURRENT_BINARY_DIR}/generated/wl_update_config.h)
+add_library(wl_updater STATIC
+    updater/src/common.cpp
+    updater/src/update_manifest.cpp
+    updater/src/http_win.cpp
+    updater/src/feed.cpp
+    updater/src/apply.cpp)
+target_include_directories(wl_updater PUBLIC updater/include PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(wl_updater PUBLIC wl_core winhttp bcrypt)
+target_compile_options(wl_updater PRIVATE -Wall -Wextra)
+target_compile_definitions(wl_updater PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+add_executable(wl_release tools/wl_release.cpp)
+target_link_libraries(wl_release PRIVATE wl_updater)
+if(MINGW)
+    target_link_options(wl_release PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
 enable_testing()
-add_executable(wl_tests tests/tests.cpp)
-target_link_libraries(wl_tests PRIVATE wl_core)
+add_executable(wl_tests tests/tests.cpp tests/updater_tests.cpp)
+target_link_libraries(wl_tests PRIVATE wl_core wl_updater)
 add_test(NAME wl_tests COMMAND wl_tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # ---- Interfaz (opcional: -DWL_BUILD_APP=OFF compila solo el núcleo y los tests)
@@ -56,8 +85,8 @@ if(WL_BUILD_APP)
     target_compile_definitions(wl_imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_DISABLE_DEMO_WINDOWS IMGUI_DISABLE_DEBUG_TOOLS)
     target_link_libraries(wl_imgui PUBLIC SDL3::SDL3-static)
 
-    add_executable(wii_launcher WIN32 app/main.cpp app/prefs.cpp)
-    target_link_libraries(wii_launcher PRIVATE wl_core wl_imgui)
+    add_executable(wii_launcher WIN32 app/main.cpp app/prefs.cpp app/update_service.cpp)
+    target_link_libraries(wii_launcher PRIVATE wl_core wl_updater wl_imgui)
     target_compile_options(wii_launcher PRIVATE -Wall -Wextra)
     set_target_properties(wii_launcher PROPERTIES OUTPUT_NAME "wii-launcher")
     if(MINGW)
