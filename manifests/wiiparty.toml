@@ -1,0 +1,16 @@
+# Wii Party · port wii_recomp (repo wiiparty-recomp). Instalado y compilado por wiipartyrecomp-launcher.exe.
+# Sala: lobby.cpp del launcher 2611-029, copiado tal cual (adapters/wiiparty/room/).
+manifest_version = 1
+game_id = "wiiparty"
+display_name = "Wii Party"
+status = "playable"
+adapter = "wiiparty"
+adapter_version = 1
+install_folder = "WiiPartyOnline"
+executable = "bin/wiiparty.exe"
+working_dir = "."
+disc_ids = ["SUPP01", "SUPE01"]
+max_players = 4
+capabilities = ["local", "lan_host", "lan_join"]
+notes = "Online por LAN o VPN (Hamachi), compatible con el launcher 2611-029."
+installer = "instaladores/wiipartyrecomp-launcher.exe"

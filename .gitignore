@@ -1,0 +1,73 @@
+# Launcher unificado: solo código fuente publicable. Ver docs/updater/01-repositorio.md.
+
+# Compilaciones y paquetes (se generan; nunca se versionan)
+/build/
+/build-*/
+/dist/
+/out/
+*.exe
+*.dll
+*.a
+*.o
+*.obj
+*.lib
+*.pdb
+*.zip
+*.tgz
+*.tar.gz
+*.7z
+*.bmp
+
+# Discos, volcados y datos de Wii (prohibido subirlos)
+*.iso
+*.wbfs
+*.rvz
+*.wia
+*.gcz
+*.ciso
+*.wad
+*.dol
+*.elf
+*.rel
+*.arc
+*.szs
+*.brres
+*.nand
+keys.bin
+otp.bin
+seeprom.bin
+
+# Datos de usuario, partidas y registros
+*.log
+*.err
+*.sav
+prefs.ini
+metricas.txt
+UserData/
+
+# Claves y secretos (la clave privada de firma de releases jamás entra en el repo)
+*.key
+*.pem
+*.pfx
+*.p12
+*.asc
+*.asc.gh
+*.secret
+.env
+.env.*
+*_private*
+updater-signing*
+
+# Material de otros proyectos que vive en esta carpeta pero no es del launcher
+/parches/
+/build-tools/
+/third_party_imgui.tgz
+/wlaunch
+
+# Herramientas locales
+.vs/
+.vscode/
+.idea/
+*.user
+Thumbs.db
+Desktop.ini

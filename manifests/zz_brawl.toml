@@ -1,0 +1,8 @@
+manifest_version = 1
+game_id = "brawl"
+display_name = "Super Smash Bros. Brawl"
+status = "planned"
+adapter = "none"
+adapter_version = 1
+max_players = 1
+notes = "Previsto. Sin desarrollo todavía."

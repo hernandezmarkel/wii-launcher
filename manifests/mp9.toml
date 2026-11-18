@@ -1,0 +1,15 @@
+# Mario Party 9 · port wii_recomp (repo mp9-recomp). Instalado y compilado por mp9online-launcher.exe.
+manifest_version = 1
+game_id = "mp9"
+display_name = "Mario Party 9"
+status = "in_development"
+adapter = "mp9"
+adapter_version = 1
+install_folder = "MarioParty9Online"
+executable = "bin/mp9.exe"
+working_dir = "."
+disc_ids = ["SSQE01"]
+max_players = 4
+capabilities = ["local", "lan_host", "lan_join"]
+notes = "Online por LAN o VPN (Hamachi). Sin servidores."
+installer = "instaladores/mp9online-launcher.exe"

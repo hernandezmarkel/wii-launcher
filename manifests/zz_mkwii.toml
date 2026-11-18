@@ -1,0 +1,17 @@
+# Mario Kart Wii · WiiCompiled (rama lan12) en beta. Lo compila su instalador en cada PC desde el disco
+# de cada uno. Online: servidor WFC en la LAN que arranca el anfitrión (mkwii-recomp/lan/docs/06).
+manifest_version = 1
+game_id = "mkwii"
+display_name = "Mario Kart Wii"
+status = "beta"
+adapter = "mkwii"
+adapter_version = 1
+install_folder = "MKWiiLAN"
+executable = "juego/WiiCompiled.exe"
+working_dir = "juego"
+disc_ids = ["RMCE01", "RMCP01", "RMCJ01"]
+max_players = 12
+capabilities = ["local", "lan_wfc"]
+notes = "Beta: el online por LAN solo se ha probado hasta el menú online en un PC. Puede fallar."
+installer = "instaladores/mkwii/Instalar-MKWii-LAN.ps1"
+lan_server_script = "servidor-mkw/Iniciar-ServidorLAN.ps1"
