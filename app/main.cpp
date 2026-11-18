@@ -437,6 +437,14 @@ void open_legacy_launcher(App& app, Game& g, SDL_Window* window) {
         g.message_bad = !p.ok;
         return;
     }
+    // El manifest dice que el paquete trae instalador, pero no está junto al launcher (p. ej. solo se bajó el ZIP del
+    // launcher): se explica qué falta en vez de pedir un .exe, que confunde (se espera elegir el disco).
+    if (!g.manifest.installer.empty()) {
+        g.message = "No encuentro el instalador de " + g.manifest.display_name + " (" + g.manifest.installer +
+                    ") junto al launcher. Descomprime el paquete completo del launcher, con su carpeta instaladores, y vuelve a pulsar.";
+        g.message_bad = true;
+        return;
+    }
     std::string path = app.prefs.get("legacy_launcher." + g.manifest.game_id);
     std::error_code e;
     if (path.empty() || !fs::is_regular_file(fs::u8path(path), e)) {
