@@ -273,6 +273,8 @@ bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod
     mod.set("source_page", meta.source_page);
     mod.set("license", meta.license);
     mod.set("author", meta.author);
+    mod.set("source_file_id", meta.source_file_id);
+    mod.set("source_md5", meta.source_md5);
     mod.set("package_sha256", package_sha);
     mod.set("content_sha256", content_sha);
     mod.set("format", format_name(plan.format));

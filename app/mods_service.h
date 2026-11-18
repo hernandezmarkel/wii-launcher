@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "wl/mods/gamebanana.h"
 #include "wl/mods/store.h"
 
 namespace wl {
@@ -34,6 +35,25 @@ struct ModsSnapshot {
     bool has_preview = false;
     std::string preview_source;    // ruta en UTF-8
     mods::PackagePlan preview;
+    // Explorar (GameBanana)
+    int64_t gb_game = 0;
+    int page = 1;
+    std::string search;
+    mods::CatalogPage catalog;
+    bool catalog_loaded = false;
+    std::string catalog_error;
+    bool has_detail = false;
+    mods::CatalogDetail detail;
+    std::vector<mods::QuickCheck> checks;   // una por archivo de la ficha
+    // Actualizaciones
+    struct Update {
+        std::string key, name, installed_version, latest_version, latest_file;
+        int64_t mod_id = 0;
+        bool available = false;
+        std::string note;
+    };
+    std::vector<Update> updates;
+    bool updates_checked = false;
 };
 
 class ModsService {
@@ -53,6 +73,12 @@ public:
     void delete_profile(const std::string& name);
     void uninstall(const std::string& key);
     void cancel() { cancel_ = true; }
+    void browse(int page, const std::string& search);
+    void open_detail(int64_t mod_id);
+    void close_detail();
+    // Tras el consentimiento explícito del usuario: descarga a staging y abre la revisión previa.
+    void download_file(int64_t mod_id, int64_t file_id);
+    void check_updates();
     void clear_messages();
 
 private:
@@ -68,6 +94,10 @@ private:
     bool stop_ = false;
     std::atomic<bool> cancel_{false};
     std::unique_ptr<mods::ModStore> store_;
+    std::unique_ptr<upd::HttpClient> http_;
+    std::unique_ptr<mods::GameBananaProvider> gb_;
+    mods::ModMeta pending_meta_;     // metadatos del proveedor para la instalación pendiente
+    std::filesystem::path pending_download_;   // archivo descargado en staging (se borra al instalar o descartar)
     ModsSnapshot snap_;
 };
 

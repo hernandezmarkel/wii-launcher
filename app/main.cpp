@@ -156,6 +156,10 @@ void apply_style(float scale) {
     s.Colors[ImGuiCol_Header] = v4(P.card_hover);
     s.Colors[ImGuiCol_HeaderHovered] = v4(P.card_hover);
     s.Colors[ImGuiCol_HeaderActive] = v4(P.line);
+    s.Colors[ImGuiCol_Tab] = v4(P.card);
+    s.Colors[ImGuiCol_TabHovered] = v4(P.card_hover);
+    s.Colors[ImGuiCol_TabSelected] = v4(P.line);
+    s.Colors[ImGuiCol_TabSelectedOverline] = v4(P.accent);
     s.Colors[ImGuiCol_ScrollbarBg] = v4(IM_COL32(0, 0, 0, 0));
     s.Colors[ImGuiCol_ScrollbarGrab] = v4(P.line);
     s.ScaleAllSizes(scale);
@@ -216,6 +220,9 @@ struct App {
     bool mod_activate = true;
     char new_profile[40] = {};
     std::string confirm_uninstall;   // clave pendiente de confirmar
+    char gb_search[64] = {};
+    int64_t consent_file = 0;       // archivo de GameBanana esperando «Sí, descargar»
+    int gb_requested = -1;          // juego cuyo catálogo ya se pidió (evita pedirlo en cada fotograma)
     std::string room_fingerprint;    // conjunto de mods con el que se entró en la sala (se revalida al empezar)
 };
 
@@ -993,6 +1000,149 @@ void mods_preview_card(App& app, const ModsSnapshot& m, float width) {
     ImGui::EndChild();
 }
 
+const char* verdict_text(const mods::QuickCheck& q, ImU32& color) {
+    switch (q.verdict) {
+        case mods::QuickVerdict::Compatible: color = P.ok; return "Compatible con tu disco";
+        case mods::QuickVerdict::Incompatible: color = P.bad; return "No compatible";
+        default: color = P.warn; return "Se comprueba al descargar";
+    }
+}
+
+void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
+    if (!m.gb_game) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 14, P.dim, "Este juego no tiene catálogo en GameBanana.");
+        return;
+    }
+    if (!m.catalog_loaded && app.gb_requested != app.mods_game) { app.mods->browse(1, ""); app.gb_requested = app.mods_game; }
+    if (m.has_detail) {
+        const mods::CatalogDetail& d = m.detail;
+        ImGui::SetCursorPosX(x0);
+        ImGui::BeginChild("##detail", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+        ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+        text(g_semibold, 17, P.text, d.item.name.c_str(), width - px(44));
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13, P.dim, ("de " + d.item.author + " · " + d.item.category + (d.item.version.empty() ? "" : " · versión " + d.item.version)).c_str(), width - px(44));
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 12.5f, P.faint, ("Licencia: " + (d.license.empty() ? std::string("no indicada") : d.license)).c_str(), width - px(44));
+        if (!d.description.empty()) {
+            ImGui::SetCursorPosX(px(22));
+            text(g_regular, 13, P.dim, d.description.substr(0, 500).c_str(), width - px(44));
+        }
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 12, P.faint, "Los datos de la ficha vienen del autor y de GameBanana: no prueban que el mod sea seguro ni que funcione. "
+                                     "El launcher lo comprueba él mismo antes y después de descargar.", width - px(44));
+        for (size_t i = 0; i < d.files.size(); ++i) {
+            const mods::CatalogFile& f = d.files[i];
+            ImGui::PushID((int)i);
+            ImU32 vc = P.warn;
+            const char* vt = i < m.checks.size() ? verdict_text(m.checks[i], vc) : "—";
+            ImGui::SetCursorPosX(px(22));
+            text(g_semibold, 13.5f, P.text, (f.name + "  ·  " + human_size(f.size) + "  ·  antivirus de GameBanana: " + (f.av_result.empty() ? "?" : f.av_result)).c_str(), width - px(44));
+            ImGui::SetCursorPosX(px(34));
+            std::string why = i < m.checks.size() ? m.checks[i].reason : "";
+            if (i < m.checks.size() && m.checks[i].files) why = "cambia " + std::to_string(m.checks[i].files) + " archivo(s) de tu disco";
+            text(g_regular, 13, vc, (std::string(vt) + (why.empty() ? "" : ": " + why)).c_str(), width - px(56));
+            bool installable = i < m.checks.size() && m.checks[i].verdict != mods::QuickVerdict::Incompatible && m.checks[i].reason.find(".7z") == std::string::npos;
+            ImGui::SetCursorPosX(px(34));
+            if (app.consent_file == f.id) {
+                text(g_regular, 13, P.warn, ("¿Descargar «" + f.name + "» (" + human_size(f.size) + ") desde gamebanana.com? Se comprobará y te pediré confirmación antes de instalar.").c_str(), width - px(56));
+                ImGui::SetCursorPosX(px(34));
+                if (button("Sí, descargar", Btn::Primary, !m.busy, px(160))) { app.mods->download_file(d.item.id, f.id); app.consent_file = 0; }
+                ImGui::SameLine();
+                if (button("No", Btn::Ghost, true, px(70))) app.consent_file = 0;
+            } else if (button("Descargar y revisar", Btn::Secondary, installable && !m.busy, px(200), "Este archivo no se puede instalar en este port.")) {
+                app.consent_file = f.id;
+            }
+            ImGui::PopID();
+        }
+        ImGui::SetCursorPosX(px(22));
+        if (button("Abrir página", Btn::Ghost, true, px(150))) SDL_OpenURL(d.item.profile_url.c_str());
+        ImGui::SameLine();
+        if (button("‹ Volver a la lista", Btn::Ghost, true, px(190))) { app.mods->close_detail(); app.consent_file = 0; }
+        ImGui::Dummy(ImVec2(0, px(12)));
+        ImGui::EndChild();
+        return;
+    }
+    ImGui::SetCursorPosX(x0);
+    ImGui::SetNextItemWidth(px(320));
+    bool go = ImGui::InputTextWithHint("##gbsearch", "Buscar en GameBanana", app.gb_search, sizeof app.gb_search, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if (button("Buscar", Btn::Secondary, !m.busy, px(110)) || go) app.mods->browse(1, app.gb_search);
+    if (!m.catalog_error.empty()) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 13.5f, P.bad, m.catalog_error.c_str(), width);
+        ImGui::SetCursorPosX(x0);
+        if (button("Reintentar", Btn::Ghost, !m.busy, px(130))) app.mods->browse(m.page, m.search);
+    }
+    if (m.catalog.from_cache) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 12, P.faint, "Mostrando datos guardados (sin conexión o consultados hace poco).");
+    }
+    ImGui::SetCursorPosX(x0);
+    ImGui::BeginChild("##catalog", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::Dummy(ImVec2(0, px(8)));
+    for (const auto& it : m.catalog.items) {
+        ImGui::PushID((int)it.id);
+        ImGui::SetCursorPosX(px(22));
+        if (ImGui::Selectable(("##it" + std::to_string(it.id)).c_str(), false, ImGuiSelectableFlags_None, ImVec2(width - px(44), px(40)))) app.mods->open_detail(it.id);
+        ImGui::SameLine(px(32));
+        ImGui::BeginGroup();
+        text(g_semibold, 14, P.text, it.name.c_str());
+        text(g_regular, 12, P.faint, (it.category + " · " + it.author).c_str());
+        ImGui::EndGroup();
+        ImGui::PopID();
+    }
+    if (m.catalog.items.empty() && m.catalog_loaded && m.catalog_error.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13.5f, P.dim, "Sin resultados.");
+    }
+    ImGui::SetCursorPosX(px(22));
+    if (button("‹ Anterior", Btn::Ghost, m.page > 1 && !m.busy, px(130))) app.mods->browse(m.page - 1, m.search);
+    ImGui::SameLine();
+    text(g_regular, 13, P.faint, ("Página " + std::to_string(m.page) + " · " + std::to_string(m.catalog.total) + " mods").c_str());
+    ImGui::SameLine();
+    if (button("Siguiente ›", Btn::Ghost, !m.catalog.complete && (int64_t)m.page * 20 < m.catalog.total && !m.busy, px(130))) app.mods->browse(m.page + 1, m.search);
+    ImGui::SetCursorPosX(px(22));
+    text(g_regular, 12, P.faint, "Abre un mod para ver si es compatible con tu disco antes de descargar nada.");
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+}
+
+void mods_updates_tab(App& app, const ModsSnapshot& m, float x0, float width) {
+    if (m.has_detail) {   // «Ver y actualizar» abre la ficha aquí mismo
+        mods_explore_tab(app, m, x0, width);
+        return;
+    }
+    ImGui::SetCursorPosX(x0);
+    text(g_regular, 13.5f, P.dim, "Solo se buscan al pulsar el botón (nunca al arrancar). Una versión nueva se instala aparte: "
+                                  "la anterior sigue instalada y puedes volver a ella marcándola en Instalados.", width);
+    ImGui::SetCursorPosX(x0);
+    if (button("Buscar actualizaciones", Btn::Secondary, !m.busy, px(230))) app.mods->check_updates();
+    if (!m.updates_checked) return;
+    ImGui::SetCursorPosX(x0);
+    ImGui::BeginChild("##updates", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::Dummy(ImVec2(0, px(8)));
+    if (m.updates.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13.5f, P.dim, "No hay mods de GameBanana instalados (los importados a mano no se actualizan solos).");
+    }
+    for (const auto& u : m.updates) {
+        ImGui::PushID(u.key.c_str());
+        ImGui::SetCursorPosX(px(22));
+        text(g_semibold, 14, P.text, (u.name + "  " + u.installed_version + (u.available ? "  →  " + u.latest_version : "")).c_str());
+        ImGui::SetCursorPosX(px(34));
+        text(g_regular, 13, u.available ? P.accent : P.faint, u.note.c_str(), width - px(56));
+        if (u.available) {
+            ImGui::SetCursorPosX(px(34));
+            if (button("Ver y actualizar", Btn::Secondary, !m.busy, px(180))) app.mods->open_detail(u.mod_id);
+        }
+        ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+}
+
 void mods_page(App& app, float width) {
     ModsSnapshot m = app.mods ? app.mods->snapshot() : ModsSnapshot{};
     Game& g = *app.games[app.mods_game >= 0 ? app.mods_game : app.selected];
@@ -1097,8 +1247,20 @@ void mods_page(App& app, float width) {
     ImGui::SetCursorPosX(x0);
     text(g_regular, 12, P.faint, "También puedes arrastrar un ZIP o una carpeta a esta ventana. Los .7z y .rar: descomprímelos y elige la carpeta.", width);
 
-    // Instalados
+    // Pestañas: Instalados / Explorar / Actualizaciones
     ImGui::Dummy(ImVec2(0, px(6)));
+    ImGui::SetCursorPosX(x0);
+    int tab = 0;
+    ImGui::PushFont(g_semibold, 14.5f);
+    if (ImGui::BeginTabBar("##modtabs")) {
+        if (ImGui::BeginTabItem("Instalados y perfiles")) { tab = 0; ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Explorar")) { tab = 1; ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Actualizaciones")) { tab = 2; ImGui::EndTabItem(); }
+        ImGui::EndTabBar();
+    }
+    ImGui::PopFont();
+    if (tab == 1) { mods_explore_tab(app, m, x0, width); return; }
+    if (tab == 2) { mods_updates_tab(app, m, x0, width); return; }
     ImGui::SetCursorPosX(x0);
     ImGui::BeginChild("##installed", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
     ImGui::SetCursorPos(ImVec2(px(22), px(18)));

@@ -443,6 +443,10 @@ PackagePlan analyze_package(const PackageSource& source, const Fst& fst, const G
             case Kind::DolphinTexture: reasons.insert("son texturas de Dolphin (tex1_*.png): este motor no tiene cargador de texturas"); break;
         }
         if (e.size > support.max_file_bytes) reasons.insert("archivo demasiado grande: " + e.name);
+        // Un paquete que trae módulos de código (aunque el XML todavía no se haya leído) es un mod de código.
+        for (const auto& suf : support.blocked_suffixes)
+            if (ends_with(lower(e.name), suf))
+                reasons.insert("trae módulos de código (" + basename(e.name) + "): este port es una recompilación estática, ese cambio requiere recompilar");
     }
     plan.blocking.assign(reasons.begin(), reasons.end());
     if (!plan.blocking.empty()) return plan;

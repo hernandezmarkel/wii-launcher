@@ -32,6 +32,7 @@ constexpr const char* kVanilla = "vanilla";
 struct ModMeta {               // lo que se sabe del origen (el usuario o el proveedor); NO es prueba de nada
     std::string id;            // «local.nombre» o «gamebanana.123456»; vacío = se deduce del archivo
     std::string name, version, provider = "local", source_id, source_page, license, author;
+    std::string source_file_id, source_md5;   // archivo concreto del proveedor (para detectar actualizaciones)
 };
 
 struct InstalledMod {

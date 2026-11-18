@@ -1,6 +1,7 @@
 #include "mods_service.h"
 
 #include <algorithm>
+#include <cctype>
 
 #include "wl/mods/launch.h"
 #include "wl/mods/safe_path.h"
@@ -102,6 +103,13 @@ void ModsService::open(const std::string& game_id, const std::string& game_name,
         }
         store_ = std::move(store);
         snap_.ready = true;
+        snap_.gb_game = gamebanana_game(game_id);
+        if (!http_) http_ = upd::make_winhttp_client();
+        gb_ = std::make_unique<GameBananaProvider>(*http_, store_->root() / "cache" / "catalog");
+        std::error_code ec;
+        fs::remove_all(store_->root() / "cache" / "downloads", ec);   // descargas que nadie llegó a instalar
+        pending_download_.clear();
+        pending_meta_ = ModMeta{};
         snap_.base = store_->base();
         reload_locked();
     });
@@ -110,6 +118,12 @@ void ModsService::open(const std::string& game_id, const std::string& game_name,
 void ModsService::preview(const fs::path& source) {
     post("Analizando el paquete…", [this, source] {
         if (!store_) return;
+        if (source != pending_download_) {   // importación manual: olvida una descarga pendiente
+            std::error_code ec;
+            if (!pending_download_.empty()) fs::remove(pending_download_, ec);
+            pending_download_.clear();
+            pending_meta_ = ModMeta{};
+        }
         PackagePlan plan;
         std::string e;
         bool ok = store_->preview(source, plan, e);
@@ -126,9 +140,15 @@ void ModsService::preview(const fs::path& source) {
 }
 
 void ModsService::discard_preview() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    snap_.has_preview = false;
-    snap_.preview = PackagePlan{};
+    post("Descartando…", [this] {
+        std::error_code ec;
+        if (!pending_download_.empty()) fs::remove(pending_download_, ec);
+        pending_download_.clear();
+        pending_meta_ = ModMeta{};
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_.has_preview = false;
+        snap_.preview = PackagePlan{};
+    });
 }
 
 void ModsService::install_preview(const std::string& name, const std::string& version, bool activate) {
@@ -141,9 +161,9 @@ void ModsService::install_preview(const std::string& name, const std::string& ve
     }
     post("Instalando…", [this, source, name, version, activate] {
         if (!store_) return;
-        ModMeta meta;
-        meta.name = name;
-        meta.version = version;
+        ModMeta meta = pending_meta_;   // del proveedor, si viene de Explorar
+        if (!name.empty()) meta.name = name;
+        if (!version.empty()) meta.version = version;
         InstalledMod mod;
         std::string e;
         auto progress = [this](const std::string& what, uint64_t done, uint64_t total) {
@@ -156,6 +176,10 @@ void ModsService::install_preview(const std::string& name, const std::string& ve
             if (wake_) wake_();
         };
         bool ok = store_->install(from_utf8(source), meta, mod, e, progress, [this] { return cancel_.load(); });
+        std::error_code ec;
+        if (!pending_download_.empty()) fs::remove(pending_download_, ec);
+        pending_download_.clear();
+        pending_meta_ = ModMeta{};
         std::string why;
         if (ok && activate) {
             Profile p;
@@ -243,6 +267,153 @@ void ModsService::uninstall(const std::string& key) {
         if (!ok) snap_.error = "No se ha desinstalado: " + e;
         else snap_.notice = "Desinstalado.";
         reload_locked();
+    });
+}
+
+// ------------------------------------------------------------------ Explorar / actualizaciones
+
+void ModsService::browse(int page, const std::string& search) {
+    post("Consultando GameBanana…", [this, page, search] {
+        if (!gb_) return;
+        CatalogPage cp;
+        std::string e;
+        bool ok = gb_->list(gamebanana_game(snap_.game_id), page, search, cp, e);
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_.page = page;
+        snap_.search = search;
+        snap_.catalog_loaded = true;
+        if (ok) {
+            snap_.catalog = std::move(cp);
+            snap_.catalog_error.clear();
+        } else {
+            snap_.catalog = CatalogPage{};
+            snap_.catalog_error = e + " El resto del launcher y los mods instalados siguen funcionando.";
+        }
+    });
+}
+
+void ModsService::open_detail(int64_t mod_id) {
+    post("Cargando la ficha…", [this, mod_id] {
+        if (!gb_ || !store_) return;
+        CatalogDetail d;
+        std::string e;
+        bool ok = gb_->detail(mod_id, d, e);
+        std::vector<QuickCheck> checks;
+        if (ok) {
+            for (const auto& f : d.files) {
+                QuickCheck q;
+                std::string lower = f.name;
+                for (auto& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                std::vector<std::string> tree;
+                std::string te;
+                if (lower.size() > 3 && (lower.rfind(".7z") == lower.size() - 3 || lower.rfind(".rar") == lower.size() - 4)) {
+                    q.verdict = QuickVerdict::NeedsDownload;
+                    q.reason = "archivo .7z/.rar: descárgalo desde la página, descomprímelo e importa la carpeta";
+                } else if (f.size > kMaxModDownload) {
+                    q.verdict = QuickVerdict::Incompatible;
+                    q.reason = "demasiado grande para un mod (¿un disco entero?)";
+                } else if (gb_->file_tree(f.id, tree, te)) {
+                    q = quick_check(tree, store_->fst(), store_->support(), store_->base().disc_id);
+                } else {
+                    q.reason = te;
+                }
+                checks.push_back(q);
+            }
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ok) { snap_.error = e; return; }
+        snap_.has_detail = true;
+        snap_.detail = std::move(d);
+        snap_.checks = std::move(checks);
+    });
+}
+
+void ModsService::close_detail() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snap_.has_detail = false;
+}
+
+void ModsService::download_file(int64_t mod_id, int64_t file_id) {
+    post("Descargando…", [this, mod_id, file_id] {
+        if (!gb_ || !store_) return;
+        CatalogDetail d;
+        std::string e;
+        // Se vuelve a pedir la ficha: los datos de la descarga salen del proveedor, nunca de la UI ni de una sala.
+        if (!gb_->detail(mod_id, d, e)) { std::lock_guard<std::mutex> lock(mutex_); snap_.error = e; return; }
+        const CatalogFile* file = nullptr;
+        for (const auto& f : d.files)
+            if (f.id == file_id) file = &f;
+        if (!file) { std::lock_guard<std::mutex> lock(mutex_); snap_.error = "Ese archivo ya no está en GameBanana."; return; }
+        fs::path dest = store_->root() / "cache" / "downloads" / (std::to_string(file_id) + ".zip");
+        auto progress = [this](uint64_t got, uint64_t total) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                snap_.done = got;
+                snap_.total = total;
+            }
+            if (wake_) wake_();
+            return !cancel_.load();
+        };
+        bool ok = gb_->download(*file, dest, e, progress);
+        if (!ok) { std::lock_guard<std::mutex> lock(mutex_); snap_.error = "Descarga fallida: " + e + " No se ha instalado nada."; return; }
+        PackagePlan plan;
+        ok = store_->preview(dest, plan, e);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ok) {
+            std::error_code ec;
+            fs::remove(dest, ec);
+            snap_.error = "El archivo descargado no se puede abrir: " + e;
+            return;
+        }
+        pending_download_ = dest;
+        pending_meta_ = ModMeta{};
+        pending_meta_.id = "gamebanana." + std::to_string(d.item.id);
+        pending_meta_.name = d.item.name;
+        pending_meta_.version = file->version.empty() ? d.item.version : file->version;
+        pending_meta_.provider = "gamebanana";
+        pending_meta_.source_id = std::to_string(d.item.id);
+        pending_meta_.source_page = d.item.profile_url;
+        pending_meta_.license = d.license.substr(0, 300);
+        pending_meta_.author = d.item.author;
+        pending_meta_.source_file_id = std::to_string(file->id);
+        pending_meta_.source_md5 = file->md5;
+        snap_.has_detail = false;
+        snap_.has_preview = true;
+        snap_.preview = std::move(plan);
+        snap_.preview_source = to_utf8(dest);
+    });
+}
+
+void ModsService::check_updates() {
+    post("Buscando actualizaciones…", [this] {
+        if (!gb_ || !store_) return;
+        std::vector<ModsSnapshot::Update> out;
+        for (const auto& m : store_->installed()) {
+            if (m.json["provider"].str() != "gamebanana") continue;
+            ModsSnapshot::Update u;
+            u.key = m.key;
+            u.name = m.name();
+            u.installed_version = m.version();
+            u.mod_id = std::atoll(m.json["source_id"].str().c_str());
+            CatalogDetail d;
+            std::string e;
+            if (!gb_->detail(u.mod_id, d, e)) { u.note = e; out.push_back(u); continue; }
+            if (d.withheld || d.trashed) { u.note = "retirado de GameBanana"; out.push_back(u); continue; }
+            // Más reciente = archivo añadido más tarde. Se compara la identidad del archivo (id + MD5), no la fecha
+            // ni el número de versión: dos archivos con la misma versión pueden ser distintos.
+            const CatalogFile* newest = nullptr;
+            for (const auto& f : d.files)
+                if (!newest || f.added > newest->added) newest = &f;
+            if (!newest) { u.note = "sin archivos descargables"; out.push_back(u); continue; }
+            u.latest_version = newest->version.empty() ? d.item.version : newest->version;
+            u.latest_file = std::to_string(newest->id);
+            u.available = newest->md5 != m.json["source_md5"].str() || u.latest_file != m.json["source_file_id"].str();
+            u.note = u.available ? "hay un archivo nuevo: se instala aparte y puedes volver a la versión anterior" : "al día";
+            out.push_back(u);
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_.updates = std::move(out);
+        snap_.updates_checked = true;
     });
 }
 

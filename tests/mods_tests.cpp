@@ -562,6 +562,7 @@ void test_gamebanana(const fs::path& tmp) {
     MCHECK(quick_check({"x/rel/menu.rel.lz"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
     MCHECK(quick_check({"riivolution/a.xml", "a/opening.bnr"}, fst, sup, "SUPP01").verdict == QuickVerdict::NeedsDownload);
     MCHECK(quick_check({"riivolution/a.xml", "setup.exe"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
+    MCHECK(quick_check({"riivolution/a.xml", "Pack/rel/board.rel.lz"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
     MCHECK(quick_check({"juego.iso"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
     MCHECK(quick_check({"../evil/opening.bnr"}, fst, sup, "SUPP01").verdict == QuickVerdict::Incompatible);
 }
