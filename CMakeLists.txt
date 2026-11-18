@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Ejecutables más pequeños en Release: sin símbolos y sin código no usado (el exe pasa de ~9,8 a ~6 MB).
+if(MINGW AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(-ffunction-sections -fdata-sections)
+    add_link_options(-s -Wl,--gc-sections)
+endif()
+
 # Núcleo sin UI: catálogo, manifests, adaptadores y procesos. No depende de ningún juego.
 add_library(wl_core STATIC
     core/src/manifest.cpp

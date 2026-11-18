@@ -1,5 +1,7 @@
 // Tests del updater sin red: versiones, firma, verificador, lista de orígenes, feed con un HTTP falso,
 // descarga a staging y recuperación de una instalación interrumpida. Ver docs/updater/matriz-resultados.md.
+#include <windows.h>
+
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -246,7 +248,9 @@ void run_updater_tests() {
     }
 
     // ---- descarga a staging (UpdateDownloader) y recuperación (UpdateInstaller)
-    fs::path root = fs::temp_directory_path() / ("wl-upd-test-" + std::to_string(std::rand()));
+    // Carpeta única por ejecución: std::rand() sin semilla repetía el nombre y una ejecución anterior a medias interfería.
+    fs::path root = fs::temp_directory_path() /
+                    ("wl-upd-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
     fs::path install = root / "WiiPorts", staging = root / "staging";
     std::error_code e;
     fs::create_directories(install / "manifests", e);
