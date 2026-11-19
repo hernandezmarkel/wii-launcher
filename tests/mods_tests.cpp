@@ -13,6 +13,7 @@
 #include "wl/mods/fst.h"
 #include "wl/mods/gamebanana.h"
 #include "wl/mods/json.h"
+#include "wl/mods/lobby_mods.h"
 #include "wl/mods/package.h"
 #include "wl/mods/safe_path.h"
 #include "wl/mods/session.h"
@@ -673,6 +674,21 @@ void test_session(const fs::path& tmp) {
     Json wrong = mj;
     wrong.set("protocol_version", 99);
     MCHECK(!parse_session_manifest(wrong.dump(), hm, e));   // C24: protocolo distinto → no se acepta
+
+    // Canal del manifiesto por TCP (loopback): ida y vuelta, petición inválida, puerto cerrado.
+    ManifestServer server;
+    std::string body = mj.dump();
+    uint16_t port = 47911;
+    MCHECK(server.start(port, [&] { return body; }, e));
+    std::string got;
+    MCHECK(fetch_manifest("127.0.0.1", port, got, e) && got == body);
+    SessionManifest via;
+    MCHECK(parse_session_manifest(got, via, e) && via.fingerprint == m.fingerprint);
+    MCHECK(!fetch_manifest("no.es.una.ip", port, got, e));
+    body = std::string(kMaxSessionManifest + 10, 'x');   // el anfitrión nunca envía algo que el cliente rechazaría por tamaño
+    MCHECK(!fetch_manifest("127.0.0.1", port, got, e, 1500));
+    server.stop();
+    MCHECK(!fetch_manifest("127.0.0.1", port, got, e, 800));
 }
 
 }  // namespace
