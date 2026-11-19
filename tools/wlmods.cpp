@@ -10,7 +10,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+
+#include <zlib.h>
 
 #include "wl/catalog.h"
 #include "wl/mods/gamebanana.h"
@@ -25,6 +28,99 @@ static int fail(const std::string& why) {
     std::cerr << "error: " << why << "\n";
     return 1;
 }
+
+// ---- mod de prueba (igual que tools/crear-mod-textura.py, sin Python): invierte una textura TPL de
+// locale/<idioma>/menu/common.arc.lz del disco DEL USUARIO y escribe un ZIP sin comprimir. El resultado es
+// determinista: dos PCs con el mismo disco obtienen exactamente los mismos bytes.
+static uint32_t upd_crc32(const std::vector<uint8_t>& d) { return uint32_t(crc32(0L, d.data(), uInt(d.size()))); }
+
+namespace prueba {
+
+std::vector<uint8_t> lz11_decode(const std::vector<uint8_t>& d) {
+    if (d.size() < 4 || d[0] != 0x11) return {};
+    size_t size = d[1] | (d[2] << 8) | (d[3] << 16), p = 4;
+    if (size == 0) { size = d[4] | (d[5] << 8) | (d[6] << 16) | (size_t(d[7]) << 24); p = 8; }
+    std::vector<uint8_t> out;
+    out.reserve(size);
+    while (out.size() < size && p < d.size()) {
+        uint8_t flags = d[p++];
+        for (int bit = 0; bit < 8 && out.size() < size && p < d.size(); ++bit) {
+            if (!(flags & (0x80 >> bit))) { out.push_back(d[p++]); continue; }
+            int ind = d[p] >> 4;
+            size_t n, disp;
+            if (ind == 0) { n = (((d[p] & 0xF) << 4) | (d[p + 1] >> 4)) + 0x11; disp = (((d[p + 1] & 0xF) << 8) | d[p + 2]) + 1; p += 3; }
+            else if (ind == 1) { n = (((d[p] & 0xF) << 12) | (d[p + 1] << 4) | (d[p + 2] >> 4)) + 0x111; disp = (((d[p + 2] & 0xF) << 8) | d[p + 3]) + 1; p += 4; }
+            else { n = ind + 1; disp = (((d[p] & 0xF) << 8) | d[p + 1]) + 1; p += 2; }
+            if (disp > out.size()) return {};
+            for (size_t i = 0; i < n; ++i) out.push_back(out[out.size() - disp]);
+        }
+    }
+    return out.size() == size ? out : std::vector<uint8_t>{};
+}
+
+std::vector<uint8_t> lz11_literal(const std::vector<uint8_t>& raw) {
+    std::vector<uint8_t> out{0x11, uint8_t(raw.size()), uint8_t(raw.size() >> 8), uint8_t(raw.size() >> 16)};
+    for (size_t i = 0; i < raw.size(); i += 8) {
+        out.push_back(0);
+        for (size_t j = i; j < i + 8 && j < raw.size(); ++j) out.push_back(raw[j]);
+    }
+    while (out.size() % 4) out.push_back(0);
+    return out;
+}
+
+uint32_t be32(const std::vector<uint8_t>& d, size_t o) { return (uint32_t(d[o]) << 24) | (uint32_t(d[o + 1]) << 16) | (uint32_t(d[o + 2]) << 8) | d[o + 3]; }
+uint16_t be16(const std::vector<uint8_t>& d, size_t o) { return uint16_t((d[o] << 8) | d[o + 1]); }
+
+int invert_tpl(std::vector<uint8_t>& buf, size_t start) {
+    if (be32(buf, start) != 0x0020AF30) return 0;
+    uint32_t images = be32(buf, start + 4), table = be32(buf, start + 8);
+    int changed = 0;
+    for (uint32_t k = 0; k < images; ++k) {
+        uint32_t hdr = be32(buf, start + table + k * 8);
+        uint16_t h = be16(buf, start + hdr), w = be16(buf, start + hdr + 2);
+        uint32_t fmt = be32(buf, start + hdr + 4), data = be32(buf, start + hdr + 8);
+        static const int bpp[] = {4, 8, 8, 16};
+        static const int bw[] = {8, 8, 8, 4}, bh[] = {8, 4, 4, 4};
+        if (fmt > 3) return -1;
+        size_t size = size_t((w + bw[fmt] - 1) / bw[fmt] * bw[fmt]) * ((h + bh[fmt] - 1) / bh[fmt] * bh[fmt]) * bpp[fmt] / 8;
+        size_t o = start + data;
+        for (size_t j = o; j < o + size && j < buf.size(); ++j) {
+            if (fmt <= 1) buf[j] ^= 0xFF;
+            else if (fmt == 2) buf[j] ^= 0x0F;
+            else if ((j - o) % 2 == 1) buf[j] ^= 0xFF;
+        }
+        ++changed;
+    }
+    return changed;
+}
+
+void le16(std::string& o, uint16_t v) { o += char(v & 0xFF); o += char(v >> 8); }
+void le32(std::string& o, uint32_t v) { for (int i = 0; i < 4; ++i) o += char((v >> (8 * i)) & 0xFF); }
+
+// ZIP de una sola entrada, sin comprimir (método 0), con fecha fija para que sea reproducible.
+std::string zip_one(const std::string& name, const std::vector<uint8_t>& data) {
+    uint32_t crc = upd_crc32(data);
+    std::string out, cd;
+    auto header = [&](std::string& o, bool central) {
+        le32(o, central ? 0x02014b50 : 0x04034b50);
+        if (central) le16(o, 20);
+        le16(o, 20); le16(o, 0); le16(o, 0); le16(o, 0); le16(o, 0x21);
+        le32(o, crc); le32(o, uint32_t(data.size())); le32(o, uint32_t(data.size()));
+        le16(o, uint16_t(name.size())); le16(o, 0);
+        if (central) { le16(o, 0); le16(o, 0); le16(o, 0); le32(o, 0); le32(o, 0); }
+        o += name;
+    };
+    header(out, false);
+    out.append(reinterpret_cast<const char*>(data.data()), data.size());
+    uint32_t cd_off = uint32_t(out.size());
+    header(cd, true);
+    out += cd;
+    le32(out, 0x06054b50); le16(out, 0); le16(out, 0); le16(out, 1); le16(out, 1);
+    le32(out, uint32_t(cd.size())); le32(out, cd_off); le16(out, 0);
+    return out;
+}
+
+}  // namespace prueba
 
 int main(int argc, char** argv) {
     std::vector<std::string> a;
@@ -49,6 +145,31 @@ int main(int argc, char** argv) {
     std::string error;
     if (!store.open(error)) return fail(error);
 
+    if (cmd == "crear-mod-prueba" && a.size() >= 3) {
+        std::string textura = opt.count("textura") ? opt["textura"] : "copyright.tpl";
+        std::string idioma = opt.count("idioma") ? opt["idioma"] : "sp_EU";
+        std::string rel = "locale/" + idioma + "/menu/common.arc.lz";
+        fs::path src = extracted_dir(game, root) / "files" / fs::path(rel);
+        std::ifstream in(src, std::ios::binary);
+        std::vector<uint8_t> packed((std::istreambuf_iterator<char>(in)), {});
+        std::vector<uint8_t> raw = prueba::lz11_decode(packed);
+        if (raw.size() < 32 || raw[0] != 0x55 || raw[1] != 0xAA || raw[2] != 0x38 || raw[3] != 0x2D) return fail("no se puede leer " + rel);
+        uint32_t root_off = prueba::be32(raw, 4), count = prueba::be32(raw, root_off + 8);
+        size_t names = root_off + size_t(count) * 12;
+        int changed = 0;
+        for (uint32_t i = 1; i < count; ++i) {
+            size_t e = root_off + size_t(i) * 12;
+            if (raw[e]) continue;   // carpeta
+            uint32_t name_off = prueba::be32(raw, e) & 0x00FFFFFF;
+            std::string name(reinterpret_cast<const char*>(&raw[names + name_off]));
+            if (name == textura) changed += prueba::invert_tpl(raw, prueba::be32(raw, e + 4));
+        }
+        if (changed <= 0) return fail("no se encuentra o no se admite " + textura);
+        std::string zip = prueba::zip_one("PruebaTextura/files/" + rel, prueba::lz11_literal(raw));
+        std::ofstream(fs::path(a[2]), std::ios::binary) << zip;
+        std::cout << "creado " << a[2] << " (" << zip.size() << " bytes, " << textura << " invertida)\n";
+        return 0;
+    }
     if (cmd == "preview" && a.size() >= 3) {
         PackagePlan plan;
         if (!store.preview(fs::path(a[2]), plan, error)) return fail(error);
