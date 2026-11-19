@@ -1166,7 +1166,10 @@ int main(int argc, char** argv) {
         if (app.games[app.selected]->adapter->make_room()) open_room(app, true);
     }
     SDL_ShowWindow(window);
-    if (screenshot.empty() && post_update_journal.empty() && !auto_update) app.updates->start_auto();  // hilo aparte: no retrasa la ventana
+    if (screenshot.empty() && post_update_journal.empty() && !auto_update) app.updates->start_auto();
+    // Recién actualizado: una comprobación ya, para traer los instaladores de esta misma versión (p. ej. el parche de MP9)
+    // sin esperar a la siguiente comprobación automática (cada 6 h).
+    if (!post_update_journal.empty()) app.updates->check_now();  // hilo aparte: no retrasa la ventana
     if (auto_update) app.updates->check_now();
     bool first_frame = true;
     int frames = 0;
