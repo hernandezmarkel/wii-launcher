@@ -37,6 +37,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-zlib
 
       - name: Nada no publicable en el repo (discos, binarios, claves, tokens)
         run: bash tools/comprobar-publicable.sh
