@@ -14,6 +14,9 @@
 #include <iostream>
 
 #include <zlib.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "wl/catalog.h"
 #include "wl/mods/gamebanana.h"
@@ -135,7 +138,20 @@ int main(int argc, char** argv) {
         return 1;
     }
     const std::string game = a[0], cmd = a[1];
-    Catalog catalog = load_catalog(WL_MANIFEST_DIR);
+    // Como wii-launcher.exe: la carpeta manifests\ junto al exe manda; la del repo solo en desarrollo.
+    std::string manifest_dir = WL_MANIFEST_DIR;
+    {
+        std::error_code ec;
+        fs::path exe = fs::absolute(fs::path(argv[0]), ec).parent_path();
+#ifdef _WIN32
+        wchar_t buf[MAX_PATH];
+        DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) exe = fs::path(std::wstring(buf, n)).parent_path();
+#endif
+        if (fs::is_directory(exe / "manifests", ec)) manifest_dir = (exe / "manifests").string();
+    }
+    if (opt.count("manifests")) manifest_dir = opt["manifests"];
+    Catalog catalog = load_catalog(manifest_dir);
     const Manifest* manifest = nullptr;
     for (const auto& g : catalog.games)
         if (g.manifest.game_id == game) manifest = &g.manifest;
