@@ -117,6 +117,10 @@ public:
     bool delete_profile(const std::string& name, std::string& error);
     std::string active_profile() const;
     bool set_active_profile(const std::string& name, std::string& error);
+    // Perfil de sesión temporal para una sala: guarda a qué perfil volver y lo activa. end_session() vuelve al
+    // perfil habitual (también tras un cierre inesperado: se llama al abrir el launcher). Nunca borra mods.
+    bool begin_session(Profile session, const std::string& lobby, std::string& error);
+    bool end_session(std::string& error);
 
     // Conjunto efectivo de un perfil, con fingerprint canónico.
     Effective compute(const Profile& profile) const;

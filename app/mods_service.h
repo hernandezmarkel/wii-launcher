@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "wl/mods/gamebanana.h"
+#include "wl/mods/session.h"
 #include "wl/mods/store.h"
 
 namespace wl {
@@ -54,6 +55,22 @@ struct ModsSnapshot {
     };
     std::vector<Update> updates;
     bool updates_checked = false;
+    // Sala: comparación con el anfitrión y sincronización asistida
+    struct SyncItem {
+        std::string id, name, source_id, file_name, reason;
+        uint64_t size = 0;
+        int64_t mod_id = 0, file_id = 0;
+        bool ok = false;           // se puede descargar
+        bool done = false;
+    };
+    bool session_checked = false;
+    std::string session_address, session_error;
+    uint16_t session_port = 0;
+    mods::SessionManifest session_manifest;
+    mods::SessionDiff session_diff;
+    bool sync_planned = false;
+    std::vector<SyncItem> sync;
+    bool session_active = false;   // el perfil activo es el temporal de una sala
 };
 
 class ModsService {
@@ -79,6 +96,12 @@ public:
     // Tras el consentimiento explícito del usuario: descarga a staging y abre la revisión previa.
     void download_file(int64_t mod_id, int64_t file_id);
     void check_updates();
+    // Sala (cliente): pide el manifiesto del anfitrión y compara. Nada se descarga sin sync_run().
+    void session_compare(const std::string& address, uint16_t room_port);
+    void sync_prepare();           // consulta tamaños y archivos de lo que falta (sin descargar)
+    void sync_run();               // tras el consentimiento: descarga, instala y vuelve a comparar
+    void session_use();            // activa el perfil de sesión que reproduce el del anfitrión
+    void session_end();            // vuelve al perfil habitual
     void clear_messages();
 
 private:

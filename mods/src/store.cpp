@@ -445,6 +445,29 @@ bool ModStore::set_active_profile(const std::string& name, std::string& error) {
     return write_file_atomic(root_ / "active.txt", name + "\n", error);
 }
 
+bool ModStore::begin_session(Profile session, const std::string& lobby, std::string& error) {
+    std::string current = active_profile();
+    session.name = "session";
+    session.restore = current == "session" ? (session.restore.empty() ? "default" : session.restore) : current;
+    if (current == "session") {
+        Profile old;
+        std::string e;
+        if (load_profile("session", old, e) && !old.restore.empty()) session.restore = old.restore;
+    }
+    session.lobby = lobby.substr(0, 64);
+    return save_profile(session, error) && set_active_profile("session", error);
+}
+
+bool ModStore::end_session(std::string& error) {
+    if (active_profile() != "session") return true;
+    Profile s;
+    std::string back = "default";
+    if (load_profile("session", s, error) && !s.restore.empty() && s.restore != "session") back = s.restore;
+    if (!set_active_profile(back, error)) return false;
+    std::error_code ec;
+    fs::remove(root_ / "profiles" / "session.json", ec);
+    return true;
+}
 Effective ModStore::compute(const Profile& profile) const {
     Effective eff;
     std::map<std::string, size_t> where;   // fold_key(disc) -> índice en eff.files

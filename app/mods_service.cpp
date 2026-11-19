@@ -4,6 +4,7 @@
 #include <cctype>
 
 #include "wl/mods/launch.h"
+#include "wl/mods/lobby_mods.h"
 #include "wl/mods/safe_path.h"
 
 namespace wl {
@@ -52,6 +53,9 @@ void ModsService::run() {
 void ModsService::post(std::string busy_text, std::function<void()> job) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Ocupado desde que se encola (no desde que empieza): la UI nunca ve un estado intermedio «libre».
+        if (!snap_.busy) snap_.busy_text = busy_text;
+        snap_.busy = true;
         jobs_.emplace_back(std::move(busy_text), std::move(job));
     }
     cv_.notify_one();
@@ -81,6 +85,7 @@ void ModsService::reload_locked() {
     }
     snap_.profile = p;
     snap_.effective = store_->compute(p);
+    snap_.session_active = snap_.active == "session";
 }
 
 void ModsService::open(const std::string& game_id, const std::string& game_name, const fs::path& install_root) {
@@ -414,6 +419,189 @@ void ModsService::check_updates() {
         std::lock_guard<std::mutex> lock(mutex_);
         snap_.updates = std::move(out);
         snap_.updates_checked = true;
+    });
+}
+
+// ------------------------------------------------------------------ sala
+
+void ModsService::session_compare(const std::string& address, uint16_t room_port) {
+    post("Comparando tus mods con los del anfitrión…", [this, address, room_port] {
+        if (!store_) return;
+        std::string text, e;
+        SessionManifest m;
+        bool ok = fetch_manifest(address, static_cast<uint16_t>(room_port + kManifestPortOffset), text, e) && parse_session_manifest(text, m, e);
+        Profile p;
+        std::string pe;
+        if (ok) ok = store_->load_profile(store_->active_profile(), p, pe) || (e = pe, false);
+        SessionDiff d;
+        if (ok) d = diff_session(*store_, p, m);
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_.session_checked = true;
+        snap_.session_address = address;
+        snap_.session_port = room_port;
+        snap_.sync_planned = false;
+        snap_.sync.clear();
+        if (!ok) {
+            snap_.session_error = e;
+            snap_.session_diff = SessionDiff{};
+            return;
+        }
+        snap_.session_error.clear();
+        snap_.session_manifest = std::move(m);
+        snap_.session_diff = std::move(d);
+    });
+}
+
+void ModsService::sync_prepare() {
+    post("Buscando los mods que faltan en GameBanana…", [this] {
+        if (!store_ || !gb_) return;
+        SessionDiff d;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            d = snap_.session_diff;
+        }
+        std::vector<ModsSnapshot::SyncItem> plan;
+        for (const auto& it : d.items) {
+            if (it.state != ModDiff::Missing && it.state != ModDiff::WrongVersion && it.state != ModDiff::WrongHash) continue;
+            ModsSnapshot::SyncItem s;
+            s.id = it.id;
+            s.name = it.name;
+            s.source_id = it.source_id;
+            if (!it.downloadable) { s.reason = it.detail.empty() ? "sin fuente autorizada" : it.detail; plan.push_back(s); continue; }
+            // Se busca en GameBanana por su id: la sala nunca da URLs.
+            s.mod_id = std::atoll(it.source_id.c_str());
+            CatalogDetail det;
+            std::string e;
+            if (!gb_->detail(s.mod_id, det, e)) { s.reason = e; plan.push_back(s); continue; }
+            const CatalogFile* pick = nullptr;
+            for (const auto& f : det.files) {
+                std::vector<std::string> tree;
+                std::string te;
+                if (f.size > kMaxModDownload || !gb_->file_tree(f.id, tree, te)) continue;
+                if (quick_check(tree, store_->fst(), store_->support(), store_->base().disc_id).verdict == QuickVerdict::Incompatible) continue;
+                if (!pick || f.added > pick->added) pick = &f;
+            }
+            if (!pick) { s.reason = "GameBanana no tiene un archivo compatible"; plan.push_back(s); continue; }
+            s.file_id = pick->id;
+            s.file_name = pick->name;
+            s.size = pick->size;
+            s.ok = true;
+            plan.push_back(s);
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_.sync = std::move(plan);
+        snap_.sync_planned = true;
+    });
+}
+
+void ModsService::sync_run() {
+    post("Descargando los mods de la sala…", [this] {
+        if (!store_ || !gb_) return;
+        std::vector<ModsSnapshot::SyncItem> plan;
+        SessionManifest host;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            plan = snap_.sync;
+            host = snap_.session_manifest;
+        }
+        for (auto& s : plan) {
+            if (!s.ok || cancel_) continue;
+            CatalogDetail det;
+            std::string e;
+            const CatalogFile* file = nullptr;
+            if (gb_->detail(s.mod_id, det, e))
+                for (const auto& f : det.files)
+                    if (f.id == s.file_id) file = &f;
+            if (!file) { s.reason = e.empty() ? "el archivo ya no está" : e; s.ok = false; continue; }
+            fs::path dest = store_->root() / "cache" / "downloads" / (std::to_string(file->id) + ".zip");
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                snap_.busy_text = "Descargando " + s.name;
+            }
+            auto progress = [this](uint64_t got, uint64_t total) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    snap_.done = got;
+                    snap_.total = total;
+                }
+                if (wake_) wake_();
+                return !cancel_.load();
+            };
+            std::error_code ec;
+            if (!gb_->download(*file, dest, e, progress)) { s.reason = e; s.ok = false; continue; }
+            ModMeta meta;
+            meta.id = "gamebanana." + std::to_string(det.item.id);
+            meta.name = det.item.name;
+            meta.version = file->version.empty() ? det.item.version : file->version;
+            meta.provider = "gamebanana";
+            meta.source_id = std::to_string(det.item.id);
+            meta.source_page = det.item.profile_url;
+            meta.license = det.license.substr(0, 300);
+            meta.author = det.item.author;
+            meta.source_file_id = std::to_string(file->id);
+            meta.source_md5 = file->md5;
+            InstalledMod mod;
+            bool ok = store_->install(dest, meta, mod, e, {}, [this] { return cancel_.load(); });
+            fs::remove(dest, ec);
+            if (!ok) { s.reason = e; s.ok = false; continue; }
+            // Revalidación: tiene que ser exactamente el contenido del anfitrión.
+            auto wanted = std::find_if(host.mods.begin(), host.mods.end(), [&](const SessionMod& h) { return h.id == mod.id(); });
+            if (wanted == host.mods.end() || wanted->content_sha256 != mod.content_sha()) {
+                std::string ue;
+                store_->uninstall(mod.key, ue);
+                s.reason = "el archivo de GameBanana no es el que usa el anfitrión (otra versión): pídele el suyo";
+                s.ok = false;
+                continue;
+            }
+            s.done = true;
+        }
+        Profile p;
+        std::string e;
+        store_->load_profile(store_->active_profile(), p, e);
+        SessionDiff d = diff_session(*store_, p, host);
+        std::lock_guard<std::mutex> lock(mutex_);
+        snap_.sync = std::move(plan);
+        snap_.session_diff = std::move(d);
+        reload_locked();
+    });
+}
+
+void ModsService::session_use() {
+    post("Preparando el perfil de la sala…", [this] {
+        if (!store_) return;
+        SessionDiff d;
+        SessionManifest host;
+        std::string address;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            d = snap_.session_diff;
+            host = snap_.session_manifest;
+            address = snap_.session_address;
+        }
+        std::string e;
+        bool ok = d.session_ready && store_->begin_session(d.session_profile, address, e);
+        Profile p;
+        if (ok) store_->load_profile("session", p, e);
+        SessionDiff again = ok ? diff_session(*store_, p, host) : d;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ok) snap_.error = e.empty() ? "Todavía faltan mods: no se puede preparar el perfil de la sala." : e;
+        else snap_.notice = "Perfil de la sala activo. Tu perfil habitual vuelve al salir de la sala o al cerrar la partida.";
+        snap_.session_diff = std::move(again);
+        reload_locked();
+    });
+}
+
+void ModsService::session_end() {
+    post("Volviendo a tu perfil…", [this] {
+        if (!store_) return;
+        std::string e;
+        bool ok = store_->end_session(e);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ok) snap_.error = e;
+        snap_.session_checked = false;
+        snap_.sync.clear();
+        snap_.sync_planned = false;
+        reload_locked();
     });
 }
 

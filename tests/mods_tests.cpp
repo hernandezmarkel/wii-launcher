@@ -605,6 +605,18 @@ void test_session(const fs::path& tmp) {
     d = diff_session(guest, gp, m);
     MCHECK(!d.compatible && d.disabled == 2 && d.extra == 1 && d.session_ready);
     MCHECK(guest.compute(d.session_profile).fingerprint == m.fingerprint);
+    // C20: perfil de sesión temporal y vuelta al habitual sin perder nada
+    Profile mio = gp;
+    mio.name = "mio";
+    MCHECK(guest.save_profile(mio, e) && guest.set_active_profile("mio", e));
+    MCHECK(guest.begin_session(d.session_profile, "192.168.1.20:47630", e) && guest.active_profile() == "session");
+    Profile active;
+    MCHECK(guest.load_profile("session", active, e) && active.restore == "mio" && guest.compute(active).fingerprint == m.fingerprint);
+    MCHECK(guest.begin_session(d.session_profile, "otra", e));   // repetir no pierde a qué perfil volver
+    MCHECK(guest.load_profile("session", active, e) && active.restore == "mio");
+    MCHECK(guest.end_session(e) && guest.active_profile() == "mio" && !fs::exists(tmp / "s-guest" / "profiles" / "session.json"));
+    MCHECK(guest.installed().size() == 3 && guest.load_profile("mio", active, e) && active.mods.size() == 3);
+    MCHECK(guest.end_session(e));   // sin sesión: no hace nada
     // C01: idéntico
     gp.mods = {{ga.id(), ga.key, true, {}}, {gb.id(), gb.key, true, {}}};
     d = diff_session(guest, gp, m);
