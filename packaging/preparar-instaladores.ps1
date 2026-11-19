@@ -70,6 +70,13 @@ foreach ($need in 'instaladores\mkwii\Instalar-MKWii-LAN.ps1', 'instaladores\mkw
     'servidor-mkw\tools\pgsql\bin\postgres.exe', 'servidor-mkw\wfc-server\LICENSE', 'instaladores\mkwii\src\LICENSE') {
     if (-not (Test-Path "$st\$need")) { throw "Falta $need" }
 }
+# La copia no puede quedarse a medias (pasó una vez: faltaban 1.157 archivos de pgsql\share).
+$srcShare = @(Get-ChildItem "$MkwPaquete\servidor\tools\pgsql\share" -Recurse -File).Count
+$dstShare = @(Get-ChildItem "$pg\share" -Recurse -File).Count
+if ($srcShare -ne $dstShare) { throw "pgsql\share incompleto: $dstShare de $srcShare archivos" }
+$srcSrc = @(Get-ChildItem "$MkwPaquete\instalador\src" -Recurse -File | Where-Object { $_.FullName -notmatch '\\obj\\' }).Count
+$dstSrc = @(Get-ChildItem "$st\instaladores\mkwii\src" -Recurse -File).Count
+if ($srcSrc -ne $dstSrc) { throw "src de Mario Kart incompleto: $dstSrc de $srcSrc archivos" }
 $despues = Size $st
 "Copiado {0:N0} MB -> tras limpiar {1:N0} MB" -f ($antes / 1MB), ($despues / 1MB)
 
