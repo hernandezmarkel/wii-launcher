@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <mutex>
@@ -21,9 +22,13 @@
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
+#include "mods_service.h"
 #include "prefs.h"
 #include "update_service.h"
 #include "wl/catalog.h"
+#include "wl/mods/launch.h"
+#include "wl/mods/lobby_mods.h"
+#include "wl/mods/session.h"
 #include "wl/process.h"
 #include "wl/update.h"
 
@@ -153,6 +158,10 @@ void apply_style(float scale) {
     s.Colors[ImGuiCol_Header] = v4(P.card_hover);
     s.Colors[ImGuiCol_HeaderHovered] = v4(P.card_hover);
     s.Colors[ImGuiCol_HeaderActive] = v4(P.line);
+    s.Colors[ImGuiCol_Tab] = v4(P.card);
+    s.Colors[ImGuiCol_TabHovered] = v4(P.card_hover);
+    s.Colors[ImGuiCol_TabSelected] = v4(P.line);
+    s.Colors[ImGuiCol_TabSelectedOverline] = v4(P.accent);
     s.Colors[ImGuiCol_ScrollbarBg] = v4(IM_COL32(0, 0, 0, 0));
     s.Colors[ImGuiCol_ScrollbarGrab] = v4(P.line);
     s.ScaleAllSizes(scale);
@@ -173,6 +182,8 @@ struct Game {
     double probe_ms = 0;
     // Juego en marcha.
     std::atomic<long long> running_pid{0};
+    std::atomic<bool> preparing{false};   // preparando el disco virtual de los mods antes de lanzar
+    std::atomic<bool> end_session_on_exit{false};   // partida online con perfil de sesión: volver al habitual al cerrar
     std::string message;
     bool message_bad = false;
     // Online con servidor en la LAN (lan_wfc): IP del anfitrión que se escribe en la configuración del juego.
@@ -180,7 +191,7 @@ struct Game {
     bool lan_loaded = false;
 };
 
-enum class Page { Game, Room, Launcher };
+enum class Page { Game, Room, Launcher, Mods };
 
 struct App {
     std::vector<std::unique_ptr<Game>> games;
@@ -204,6 +215,23 @@ struct App {
     bool update_notice_bad = false;
     std::string update_why_not;     // por qué no se puede aplicar ahora
     bool quit_for_update = false;
+    // Mods (docs/mods/). Subsistema aparte del updater.
+    std::unique_ptr<ModsService> mods;
+    int mods_game = -1;
+    char mod_name[64] = {};
+    char mod_version[32] = {};
+    bool mod_activate = true;
+    char new_profile[40] = {};
+    std::string confirm_uninstall;   // clave pendiente de confirmar
+    char gb_search[64] = {};
+    int64_t consent_file = 0;       // archivo de GameBanana esperando «Sí, descargar»
+    int gb_requested = -1;          // juego cuyo catálogo ya se pidió (evita pedirlo en cada fotograma)
+    std::unique_ptr<mods::ManifestServer> manifest_server;   // anfitrión: publica sus mods junto a la sala
+    bool auto_join = false;         // «unirme automáticamente cuando esté listo» (casilla)
+    bool auto_join_armed = false;   // el usuario pidió preparar los mods con esa casilla marcada
+    bool auto_session_tried = false;
+    bool sync_consent = false;      // lista de descargas de la sala a la vista, esperando «Sí»
+    std::string room_fingerprint;    // conjunto de mods con el que se entró en la sala (se revalida al empezar)
 };
 
 App* g_app = nullptr;
@@ -236,26 +264,40 @@ void probe(Game& g) {
     }).detach();
 }
 
+void set_message(Game& g, const std::string& msg, bool bad) {
+    std::lock_guard<std::mutex> lock(g.mutex);
+    g.message = msg;
+    g.message_bad = bad;
+}
+
+// Vuelve al perfil de mods habitual si el activo es el temporal de una sala (C20). Rápido y sin red.
+void end_mod_session(const Game& g) {
+    const std::string& id = g.manifest.game_id;
+    std::error_code ec;
+    if (!mods::game_support(id) || !fs::exists(mods::default_mods_root(id) / "profiles" / "session.json", ec)) return;
+    mods::ModStore store(id, mods::default_mods_root(id), mods::extracted_dir(id, g.root));
+    std::string e;
+    if (store.open(e)) store.end_session(e);
+}
+
 void launch(Game& g, const LaunchSpec& spec) {
     if (g.running_pid.load() != 0) {
-        g.message = "El juego ya está abierto.";
-        g.message_bad = false;
+        set_message(g, "El juego ya está abierto.", false);
         return;
     }
     std::error_code e;
     fs::create_directories(g.root / "logs", e);
     Spawned p = spawn(spec);
     if (!p.ok) {
-        g.message = p.error;
-        g.message_bad = true;
+        set_message(g, p.error, true);
         return;
     }
-    g.message = "Juego iniciado.";
-    g.message_bad = false;
+    set_message(g, "Juego iniciado.", false);
     g.running_pid = p.pid;
     // Un hilo espera a que el juego termine; la UI no se bloquea.
     std::thread([&g, pid = p.pid] {
         int code = wait_exit(pid, -1);
+        if (g.end_session_on_exit.exchange(false)) end_mod_session(g);
         {
             std::lock_guard<std::mutex> lock(g.mutex);
             g.running_pid = 0;
@@ -266,6 +308,55 @@ void launch(Game& g, const LaunchSpec& spec) {
                 g.message = "El juego se cerró con el código " + std::to_string(code) + ". Mira logs\\game.log en su carpeta.";
                 g.message_bad = true;
             }
+        }
+        wake();
+    }).detach();
+}
+
+// Fingerprint del perfil de mods activo («vanilla» si no hay mods o el juego no los admite). Rápido: no
+// lee los archivos de los mods, solo sus mod.json y el perfil.
+std::string active_fingerprint(const Game& g, std::string* error = nullptr) {
+    const std::string& id = g.manifest.game_id;
+    if (!mods::game_support(id)) return mods::kVanilla;
+    std::error_code ec;
+    if (!fs::exists(mods::default_mods_root(id) / "profiles", ec)) return mods::kVanilla;
+    mods::ModStore store(id, mods::default_mods_root(id), mods::extracted_dir(id, g.root));
+    std::string e;
+    mods::Profile p;
+    if (!store.open(e) || !store.load_profile(store.active_profile(), p, e)) {
+        if (error) *error = e;
+        return mods::kVanilla;
+    }
+    mods::Effective eff = store.compute(p);
+    if (!eff.problems.empty() && error) *error = eff.problems.front();
+    return eff.fingerprint;
+}
+
+// Lanza con el perfil de mods activo. El disco virtual se prepara en un hilo (enlaces y hashes) y solo
+// entonces se abre el juego. `expected`: fingerprint acordado en la sala; si el perfil cambió desde
+// entonces, no se lanza (nunca se juega online con otro conjunto de mods).
+void launch_modded(Game& g, LaunchSpec spec, std::string expected = {}) {
+    if (g.running_pid.load() != 0 || g.preparing.exchange(true)) {
+        set_message(g, "El juego ya está abierto o preparándose.", false);
+        return;
+    }
+    set_message(g, "Preparando los mods…", false);
+    wake();
+    std::thread([&g, spec, expected]() mutable {
+        mods::LaunchMods info;
+        std::string error;
+        bool ok = mods::prepare_launch(g.manifest.game_id, g.root, spec, info, error);
+        if (ok && !expected.empty() && info.fingerprint != expected) {
+            ok = false;
+            error = "Tus mods han cambiado desde que entraste en la sala: no se abre el juego para no desincronizar la partida.";
+        }
+        g.preparing = false;
+        if (!ok) {
+            set_message(g, "No se puede lanzar con mods: " + error, true);
+            if (!expected.empty()) end_mod_session(g);
+        } else {
+            if (!expected.empty()) g.end_session_on_exit = true;
+            launch(g, spec);
         }
         wake();
     }).detach();
@@ -365,6 +456,7 @@ void info_row(const char* label, const std::string& value, ImU32 color) {
 }
 
 void open_room(App& app, bool host);
+void open_mods(App& app);
 
 // "Instalar o actualizar" abre el launcher original del juego, que es quien compila desde el disco.
 // La ruta la elige el usuario una vez y se guarda en las preferencias del launcher unificado.
@@ -762,8 +854,8 @@ void game_page(App& app, Game& g, float width) {
     if (not_installed) {
         // Sin instalar: la acción principal es instalar (con el instalador incluido en el paquete).
         if (button("Instalar", Btn::Primary, true, px(150))) open_legacy_launcher(app, g, g_window);
-    } else if (button("  Jugar  ", Btn::Primary, ready && !running, px(150), why)) {
-        launch(g, g.adapter->offline(g.root));
+    } else if (button("  Jugar  ", Btn::Primary, ready && !running && !g.preparing, px(150), why)) {
+        launch_modded(g, g.adapter->offline(g.root));
     }
     bool wfc = m.has("lan_wfc");
     if (!wfc) {
@@ -772,6 +864,11 @@ void game_page(App& app, Game& g, float width) {
         if (button("Crear sala", Btn::Secondary, online && ready && !running, px(140), why_online)) open_room(app, true);
         ImGui::SameLine();
         if (button("Unirse", Btn::Secondary, online && ready && !running, px(120), why_online)) open_room(app, false);
+    }
+    const mods::GameModSupport* mod_support = mods::game_support(m.game_id);
+    if (mod_support && mod_support->proven) {
+        ImGui::SameLine();
+        if (button("Mods", Btn::Secondary, ready && !running, px(100), why)) open_mods(app);
     }
     ImGui::SameLine();
     if (button("Ajustes", Btn::Ghost, probed && s.folder, px(110), "No está instalado.")) {
@@ -802,6 +899,18 @@ void game_page(App& app, Game& g, float width) {
     info_row("Build instalada", s.revision.empty() ? "—" : s.revision, P.text);
     info_row("Disco", s.disc_id.empty() ? "—" : s.disc_id + (s.disc_ok ? "  (admitido)" : "  (no admitido)"), s.disc_ok ? P.text : P.warn);
     if (!m.has("lan_wfc")) info_row("Versión de sala", probed && g.adapter ? g.adapter->compat_token(s) : "—", P.text);
+    if (mod_support && mod_support->proven && probed && s.ready()) {
+        // Caché corta: la ficha se redibuja con cada evento y abrir el almacén lee la FST del disco.
+        static std::map<std::string, std::pair<Clock::time_point, std::string>> cache;
+        auto& c = cache[m.game_id];
+        if (c.second.empty() || Clock::now() - c.first > std::chrono::seconds(3)) c = {Clock::now(), active_fingerprint(g)};
+        const std::string& fp = c.second;
+        info_row("Mods", fp == mods::kVanilla ? "Sin mods (perfil original)" : "Perfil con mods · " + fp.substr(0, 12), fp == mods::kVanilla ? P.dim : P.accent);
+    } else if (!mod_support) {
+        info_row("Mods", m.game_id == "mkwii" ? "Requiere un perfil compilado de WiiCompiled (no disponible)" : "No admitidos", P.faint);
+    } else {
+        info_row("Mods", "Pendientes de verificar en este port", P.faint);
+    }
     info_row("Jugadores", "Hasta " + std::to_string(m.max_players), P.text);
     ImGui::Dummy(ImVec2(0, px(6)));
     ImGui::SetCursorPosX(px(22));
@@ -818,9 +927,489 @@ void game_page(App& app, Game& g, float width) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Abre el launcher actual del juego, que compila el juego desde tu disco.");
 }
 
+// ---------------------------------------------------------------- mods
+
+void open_mods(App& app) {
+    Game& g = *app.games[app.selected];
+    if (!app.mods) app.mods = std::make_unique<ModsService>([] { wake(); });
+    if (app.mods_game != app.selected) {
+        app.mods->open(g.manifest.game_id, g.manifest.display_name, g.root);
+        app.mods_game = app.selected;
+    }
+    app.page = Page::Mods;
+}
+
+struct ModPick {
+    App* app;
+};
+
+void SDLCALL picked_mod(void* data, const char* const* files, int) {
+    auto* p = static_cast<ModPick*>(data);
+    if (files && files[0] && p->app->mods) p->app->mods->preview(fs::u8path(files[0]));
+    delete p;
+    wake();
+}
+
+std::string human_size(uint64_t b) {
+    char buf[32];
+    if (b >= (1ull << 20)) std::snprintf(buf, sizeof buf, "%.1f MB", b / 1048576.0);
+    else std::snprintf(buf, sizeof buf, "%.0f KB", b / 1024.0);
+    return buf;
+}
+
+void mods_preview_card(App& app, const ModsSnapshot& m, float width) {
+    const mods::PackagePlan& plan = m.preview;
+    ImGui::BeginChild("##preview", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+    text(g_semibold, 16, P.text, "Revisar antes de instalar");
+    ImGui::SetCursorPosX(px(22));
+    text(g_regular, 12.5f, P.faint, m.preview_source.c_str(), width - px(44));
+    ImGui::SetCursorPosX(px(22));
+    std::string fmt = plan.format == mods::ModFormat::Riivolution ? "Riivolution (solo archivos)" : plan.format == mods::ModFormat::Files ? "Archivos del disco" : "—";
+    text(g_regular, 14, P.dim, ("Formato: " + fmt + " · " + human_size(plan.payload_bytes) + " · mod de datos (no ejecuta código)").c_str(), width - px(44));
+    for (const auto& b : plan.blocking) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 14, P.bad, ("No se puede instalar: " + b).c_str(), width - px(44));
+    }
+    for (const auto& w : plan.warnings) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13, P.warn, w.c_str(), width - px(44));
+    }
+    if (plan.ok()) {
+        size_t n = 0;
+        for (const auto& [id, ops] : plan.patches) n += ops.size();
+        ImGui::SetCursorPosX(px(22));
+        text(g_semibold, 13.5f, P.ok, ("Cambia " + std::to_string(n) + " archivo(s) de tu disco (sin tocarlo: se aplica al lanzar):").c_str());
+        int shown = 0;
+        for (const auto& [id, ops] : plan.patches)
+            for (const auto& op : ops)
+                if (shown++ < 8) {
+                    ImGui::SetCursorPosX(px(34));
+                    text(g_regular, 12.5f, P.dim, op.disc.c_str());
+                }
+        if (shown > 8) {
+            ImGui::SetCursorPosX(px(34));
+            text(g_regular, 12.5f, P.faint, ("… y " + std::to_string(shown - 8) + " más").c_str());
+        }
+    }
+    if (!plan.ignored.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 12.5f, P.faint, (std::to_string(plan.ignored.size()) + " archivo(s) del paquete no se usan (documentación u otra región).").c_str());
+        if (ImGui::IsItemHovered()) {
+            std::string all;
+            for (size_t i = 0; i < plan.ignored.size() && i < 20; ++i) all += plan.ignored[i] + "\n";
+            ImGui::SetTooltip("%s", all.c_str());
+        }
+    }
+    if (plan.ok()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13, P.faint, "Nombre y versión (como los llama el autor)");
+        ImGui::SetCursorPosX(px(22));
+        ImGui::SetNextItemWidth(px(300));
+        ImGui::InputTextWithHint("##modname", "Nombre del mod", app.mod_name, sizeof app.mod_name);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(px(120));
+        ImGui::InputTextWithHint("##modver", "1.0", app.mod_version, sizeof app.mod_version);
+        ImGui::SetCursorPosX(px(22));
+        ImGui::Checkbox("Activarlo en el perfil actual", &app.mod_activate);
+    }
+    ImGui::SetCursorPosX(px(22));
+    if (button("Instalar", Btn::Primary, plan.ok() && !m.busy, px(140), "Este paquete no se puede instalar.")) {
+        app.mods->install_preview(app.mod_name, app.mod_version, app.mod_activate);
+        app.mod_name[0] = app.mod_version[0] = 0;
+    }
+    ImGui::SameLine();
+    if (button("Cancelar", Btn::Ghost, true, px(130))) app.mods->discard_preview();
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+}
+
+const char* verdict_text(const mods::QuickCheck& q, ImU32& color) {
+    switch (q.verdict) {
+        case mods::QuickVerdict::Compatible: color = P.ok; return "Compatible con tu disco";
+        case mods::QuickVerdict::Incompatible: color = P.bad; return "No compatible";
+        default: color = P.warn; return "Se comprueba al descargar";
+    }
+}
+
+void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
+    if (!m.gb_game) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 14, P.dim, "Este juego no tiene catálogo en GameBanana.");
+        return;
+    }
+    if (!m.catalog_loaded && app.gb_requested != app.mods_game) { app.mods->browse(1, ""); app.gb_requested = app.mods_game; }
+    if (m.has_detail) {
+        const mods::CatalogDetail& d = m.detail;
+        ImGui::SetCursorPosX(x0);
+        ImGui::BeginChild("##detail", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+        ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+        text(g_semibold, 17, P.text, d.item.name.c_str(), width - px(44));
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13, P.dim, ("de " + d.item.author + " · " + d.item.category + (d.item.version.empty() ? "" : " · versión " + d.item.version)).c_str(), width - px(44));
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 12.5f, P.faint, ("Licencia: " + (d.license.empty() ? std::string("no indicada") : d.license)).c_str(), width - px(44));
+        if (!d.description.empty()) {
+            ImGui::SetCursorPosX(px(22));
+            text(g_regular, 13, P.dim, d.description.substr(0, 500).c_str(), width - px(44));
+        }
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 12, P.faint, "Los datos de la ficha vienen del autor y de GameBanana: no prueban que el mod sea seguro ni que funcione. "
+                                     "El launcher lo comprueba él mismo antes y después de descargar.", width - px(44));
+        for (size_t i = 0; i < d.files.size(); ++i) {
+            const mods::CatalogFile& f = d.files[i];
+            ImGui::PushID((int)i);
+            ImU32 vc = P.warn;
+            const char* vt = i < m.checks.size() ? verdict_text(m.checks[i], vc) : "—";
+            ImGui::SetCursorPosX(px(22));
+            text(g_semibold, 13.5f, P.text, (f.name + "  ·  " + human_size(f.size) + "  ·  antivirus de GameBanana: " + (f.av_result.empty() ? "?" : f.av_result)).c_str(), width - px(44));
+            ImGui::SetCursorPosX(px(34));
+            std::string why = i < m.checks.size() ? m.checks[i].reason : "";
+            if (i < m.checks.size() && m.checks[i].files) why = "cambia " + std::to_string(m.checks[i].files) + " archivo(s) de tu disco";
+            text(g_regular, 13, vc, (std::string(vt) + (why.empty() ? "" : ": " + why)).c_str(), width - px(56));
+            bool installable = i < m.checks.size() && m.checks[i].verdict != mods::QuickVerdict::Incompatible && m.checks[i].reason.find(".7z") == std::string::npos;
+            ImGui::SetCursorPosX(px(34));
+            if (app.consent_file == f.id) {
+                text(g_regular, 13, P.warn, ("¿Descargar «" + f.name + "» (" + human_size(f.size) + ") desde gamebanana.com? Se comprobará y te pediré confirmación antes de instalar.").c_str(), width - px(56));
+                ImGui::SetCursorPosX(px(34));
+                if (button("Sí, descargar", Btn::Primary, !m.busy, px(160))) { app.mods->download_file(d.item.id, f.id); app.consent_file = 0; }
+                ImGui::SameLine();
+                if (button("No", Btn::Ghost, true, px(70))) app.consent_file = 0;
+            } else if (button("Descargar y revisar", Btn::Secondary, installable && !m.busy, px(200), "Este archivo no se puede instalar en este port.")) {
+                app.consent_file = f.id;
+            }
+            ImGui::PopID();
+        }
+        ImGui::SetCursorPosX(px(22));
+        if (button("Abrir página", Btn::Ghost, true, px(150))) SDL_OpenURL(d.item.profile_url.c_str());
+        ImGui::SameLine();
+        if (button("‹ Volver a la lista", Btn::Ghost, true, px(190))) { app.mods->close_detail(); app.consent_file = 0; }
+        ImGui::Dummy(ImVec2(0, px(12)));
+        ImGui::EndChild();
+        return;
+    }
+    ImGui::SetCursorPosX(x0);
+    ImGui::SetNextItemWidth(px(320));
+    bool go = ImGui::InputTextWithHint("##gbsearch", "Buscar en GameBanana", app.gb_search, sizeof app.gb_search, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if (button("Buscar", Btn::Secondary, !m.busy, px(110)) || go) app.mods->browse(1, app.gb_search);
+    if (!m.catalog_error.empty()) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 13.5f, P.bad, m.catalog_error.c_str(), width);
+        ImGui::SetCursorPosX(x0);
+        if (button("Reintentar", Btn::Ghost, !m.busy, px(130))) app.mods->browse(m.page, m.search);
+    }
+    if (m.catalog.from_cache) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 12, P.faint, "Mostrando datos guardados (sin conexión o consultados hace poco).");
+    }
+    ImGui::SetCursorPosX(x0);
+    ImGui::BeginChild("##catalog", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::Dummy(ImVec2(0, px(8)));
+    for (const auto& it : m.catalog.items) {
+        ImGui::PushID((int)it.id);
+        ImGui::SetCursorPosX(px(22));
+        if (ImGui::Selectable(("##it" + std::to_string(it.id)).c_str(), false, ImGuiSelectableFlags_None, ImVec2(width - px(44), px(40)))) app.mods->open_detail(it.id);
+        ImGui::SameLine(px(32));
+        ImGui::BeginGroup();
+        text(g_semibold, 14, P.text, it.name.c_str());
+        text(g_regular, 12, P.faint, (it.category + " · " + it.author).c_str());
+        ImGui::EndGroup();
+        ImGui::PopID();
+    }
+    if (m.catalog.items.empty() && m.catalog_loaded && m.catalog_error.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13.5f, P.dim, "Sin resultados.");
+    }
+    ImGui::SetCursorPosX(px(22));
+    if (button("‹ Anterior", Btn::Ghost, m.page > 1 && !m.busy, px(130))) app.mods->browse(m.page - 1, m.search);
+    ImGui::SameLine();
+    text(g_regular, 13, P.faint, ("Página " + std::to_string(m.page) + " · " + std::to_string(m.catalog.total) + " mods").c_str());
+    ImGui::SameLine();
+    if (button("Siguiente ›", Btn::Ghost, !m.catalog.complete && (int64_t)m.page * 20 < m.catalog.total && !m.busy, px(130))) app.mods->browse(m.page + 1, m.search);
+    ImGui::SetCursorPosX(px(22));
+    text(g_regular, 12, P.faint, "Abre un mod para ver si es compatible con tu disco antes de descargar nada.");
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+}
+
+void mods_updates_tab(App& app, const ModsSnapshot& m, float x0, float width) {
+    if (m.has_detail) {   // «Ver y actualizar» abre la ficha aquí mismo
+        mods_explore_tab(app, m, x0, width);
+        return;
+    }
+    ImGui::SetCursorPosX(x0);
+    text(g_regular, 13.5f, P.dim, "Solo se buscan al pulsar el botón (nunca al arrancar). Una versión nueva se instala aparte: "
+                                  "la anterior sigue instalada y puedes volver a ella marcándola en Instalados.", width);
+    ImGui::SetCursorPosX(x0);
+    if (button("Buscar actualizaciones", Btn::Secondary, !m.busy, px(230))) app.mods->check_updates();
+    if (!m.updates_checked) return;
+    ImGui::SetCursorPosX(x0);
+    ImGui::BeginChild("##updates", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::Dummy(ImVec2(0, px(8)));
+    if (m.updates.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13.5f, P.dim, "No hay mods de GameBanana instalados (los importados a mano no se actualizan solos).");
+    }
+    for (const auto& u : m.updates) {
+        ImGui::PushID(u.key.c_str());
+        ImGui::SetCursorPosX(px(22));
+        text(g_semibold, 14, P.text, (u.name + "  " + u.installed_version + (u.available ? "  →  " + u.latest_version : "")).c_str());
+        ImGui::SetCursorPosX(px(34));
+        text(g_regular, 13, u.available ? P.accent : P.faint, u.note.c_str(), width - px(56));
+        if (u.available) {
+            ImGui::SetCursorPosX(px(34));
+            if (button("Ver y actualizar", Btn::Secondary, !m.busy, px(180))) app.mods->open_detail(u.mod_id);
+        }
+        ImGui::PopID();
+    }
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+}
+
+void mods_page(App& app, float width) {
+    ModsSnapshot m = app.mods ? app.mods->snapshot() : ModsSnapshot{};
+    Game& g = *app.games[app.mods_game >= 0 ? app.mods_game : app.selected];
+    bool running = g.running_pid.load() != 0 || g.preparing;
+    float x0 = ImGui::GetCursorPosX();
+    ImGui::SetCursorPos(ImVec2(x0, px(34)));
+    if (button("‹ Volver", Btn::Ghost, true, px(110))) {
+        app.page = Page::Game;
+        return;
+    }
+    ImGui::SetCursorPosX(x0);
+    text(g_semibold, 28, P.text, ("Mods · " + g.manifest.display_name).c_str());
+    ImGui::SetCursorPosX(x0);
+    text(g_regular, 13.5f, P.dim,
+         "Solo mods de datos que este port carga de verdad (archivos del disco y Riivolution sin código). Tu disco y tus partidas "
+         "guardadas no se modifican: los mods se aplican al lanzar, sobre un disco virtual.", width);
+    if (!m.base.disc_id.empty()) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 12, P.faint, ("Disco " + m.base.base_content_id).c_str());
+    }
+    ImGui::Dummy(ImVec2(0, px(4)));
+    if (m.busy) {
+        ImGui::SetCursorPosX(x0);
+        std::string t = m.busy_text;
+        if (m.total) t += "  (" + std::to_string((int)(100.0 * m.done / m.total)) + " %)";
+        text(g_regular, 14, P.accent, t.c_str(), width);
+        ImGui::SetCursorPosX(x0);
+        if (button("Cancelar operación", Btn::Ghost, true, px(190))) app.mods->cancel();
+    }
+    if (!m.error.empty() || !m.notice.empty()) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 14, m.error.empty() ? P.ok : P.bad, (m.error.empty() ? m.notice : m.error).c_str(), width);
+        ImGui::SetCursorPosX(x0);
+        if (button("Entendido", Btn::Ghost, true, px(130))) app.mods->clear_messages();
+    }
+    if (!m.ready) return;
+    if (running) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 14, P.warn, "El juego está abierto: los cambios de mods se aplican la próxima vez que lo lances (no hay recarga en caliente).", width);
+    }
+
+    if (m.has_preview) {
+        ImGui::SetCursorPosX(x0);
+        mods_preview_card(app, m, width);
+        return;
+    }
+
+    // Perfil
+    ImGui::SetCursorPosX(x0);
+    ImGui::BeginChild("##profile", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+    text(g_semibold, 15, P.text, "Perfil");
+    ImGui::SetCursorPosX(px(22));
+    ImGui::SetNextItemWidth(px(220));
+    if (ImGui::BeginCombo("##profiles", m.active.c_str())) {
+        for (const auto& name : m.profiles)
+            if (ImGui::Selectable(name.c_str(), name == m.active) && name != m.active) app.mods->activate_profile(name);
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(px(170));
+    ImGui::InputTextWithHint("##newprofile", "nuevo-perfil", app.new_profile, sizeof app.new_profile);
+    ImGui::SameLine();
+    if (button("Crear (copia)", Btn::Ghost, app.new_profile[0] && !m.busy, px(150))) {
+        app.mods->create_profile(app.new_profile, true);
+        app.new_profile[0] = 0;
+    }
+    ImGui::SameLine();
+    if (button("Borrar", Btn::Ghost, m.active != "default" && !m.busy, px(100), "El perfil «default» no se borra.")) app.mods->delete_profile(m.active);
+    ImGui::SetCursorPosX(px(22));
+    const mods::Effective& eff = m.effective;
+    std::string summary = eff.vanilla() ? "Sin mods activos: el juego arranca con tu disco original."
+                                        : std::to_string(eff.manifest_mods.size()) + " mod(s) activos · " + std::to_string(eff.files.size()) +
+                                              " archivo(s) cambiados · huella " + eff.fingerprint.substr(0, 12);
+    text(g_regular, 13.5f, eff.vanilla() ? P.dim : P.accent, summary.c_str(), width - px(44));
+    for (const auto& p : eff.problems) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13.5f, P.bad, ("Problema: " + p).c_str(), width - px(44));
+    }
+    for (const auto& c : eff.conflicts) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13, P.warn, ("Conflicto: " + c).c_str(), width - px(44));
+    }
+    ImGui::Dummy(ImVec2(0, px(10)));
+    ImGui::EndChild();
+
+    // Acciones
+    ImGui::Dummy(ImVec2(0, px(4)));
+    ImGui::SetCursorPosX(x0);
+    if (button("Importar ZIP…", Btn::Primary, !m.busy, px(160))) {
+        static const SDL_DialogFileFilter filters[] = {{"Mods (ZIP)", "zip"}};
+        SDL_ShowOpenFileDialog(picked_mod, new ModPick{&app}, g_window, filters, 1, nullptr, false);
+    }
+    ImGui::SameLine();
+    if (button("Importar carpeta…", Btn::Secondary, !m.busy, px(190))) SDL_ShowOpenFolderDialog(picked_mod, new ModPick{&app}, g_window, nullptr, false);
+    ImGui::SameLine();
+    if (button("Abrir GameBanana", Btn::Ghost, true, px(190))) {
+        static const std::map<std::string, std::string> pages = {{"wiiparty", "https://gamebanana.com/games/6370"}, {"mp9", "https://gamebanana.com/games/6248"}};
+        auto it = pages.find(m.game_id);
+        if (it != pages.end()) SDL_OpenURL(it->second.c_str());
+    }
+    ImGui::SetCursorPosX(x0);
+    text(g_regular, 12, P.faint, "También puedes arrastrar un ZIP o una carpeta a esta ventana. Los .7z y .rar: descomprímelos y elige la carpeta.", width);
+
+    // Pestañas: Instalados / Explorar / Actualizaciones
+    ImGui::Dummy(ImVec2(0, px(6)));
+    ImGui::SetCursorPosX(x0);
+    int tab = 0;
+    ImGui::PushFont(g_semibold, 14.5f);
+    if (ImGui::BeginTabBar("##modtabs")) {
+        if (ImGui::BeginTabItem("Instalados y perfiles")) { tab = 0; ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Explorar")) { tab = 1; ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem("Actualizaciones")) { tab = 2; ImGui::EndTabItem(); }
+        ImGui::EndTabBar();
+    }
+    ImGui::PopFont();
+    if (tab == 1) { mods_explore_tab(app, m, x0, width); return; }
+    if (tab == 2) { mods_updates_tab(app, m, x0, width); return; }
+    ImGui::SetCursorPosX(x0);
+    ImGui::BeginChild("##installed", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+    text(g_semibold, 15, P.text, "Instalados");
+    if (m.installed.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13.5f, P.dim, "Todavía no hay mods instalados para este juego.");
+    }
+    mods::Profile profile = m.profile;
+    bool changed = false;
+    // Primero, en orden de carga, los que están en el perfil; luego el resto.
+    std::vector<const mods::InstalledMod*> order;
+    for (const auto& e : profile.mods)
+        for (const auto& im : m.installed)
+            if (im.key == e.package) order.push_back(&im);
+    for (const auto& im : m.installed)
+        if (std::find(order.begin(), order.end(), &im) == order.end()) order.push_back(&im);
+    for (size_t i = 0; i < order.size(); ++i) {
+        const mods::InstalledMod& im = *order[i];
+        ImGui::PushID(im.key.c_str());
+        auto entry = std::find_if(profile.mods.begin(), profile.mods.end(), [&](const mods::ProfileEntry& e) { return e.package == im.key; });
+        bool in_profile = entry != profile.mods.end();
+        // Otra versión del mismo mod en el perfil: esta queda como versión anterior (para volver atrás).
+        auto same_id = std::find_if(profile.mods.begin(), profile.mods.end(), [&](const mods::ProfileEntry& e) { return e.id == im.id(); });
+        bool enabled = in_profile && entry->enabled;
+        ImGui::SetCursorPosX(px(22));
+        if (ImGui::Checkbox("##on", &enabled) && !m.busy) {
+            if (in_profile) entry->enabled = enabled;
+            else if (same_id != profile.mods.end()) { same_id->package = im.key; same_id->enabled = true; }
+            else profile.mods.push_back({im.id(), im.key, true, {}});
+            changed = true;
+        }
+        ImGui::SameLine();
+        text(g_semibold, 14, in_profile ? P.text : P.dim, (im.name() + "  " + im.version()).c_str());
+        ImGui::SameLine();
+        text(g_regular, 12.5f, P.faint, (im.json["format"].str() + " · " + im.json["provider"].str() + (in_profile ? "" : same_id != profile.mods.end() ? " · otra versión activa" : "")).c_str());
+        ImGui::SetCursorPosX(px(56));
+        if (in_profile) {
+            size_t pos = (size_t)(entry - profile.mods.begin());
+            if (button("Subir", Btn::Ghost, pos > 0 && !m.busy, px(80))) { std::swap(profile.mods[pos], profile.mods[pos - 1]); changed = true; }
+            ImGui::SameLine();
+            if (button("Bajar", Btn::Ghost, pos + 1 < profile.mods.size() && !m.busy, px(80))) { std::swap(profile.mods[pos], profile.mods[pos + 1]); changed = true; }
+            ImGui::SameLine();
+            if (button("Quitar del perfil", Btn::Ghost, !m.busy, px(170))) { profile.mods.erase(entry); changed = true; }
+        } else if (app.confirm_uninstall == im.key) {
+            text(g_regular, 13, P.warn, "¿Desinstalar? Se borra el paquete (tu disco y partidas no se tocan).");
+            ImGui::SameLine();
+            if (button("Sí, desinstalar", Btn::Secondary, !m.busy, px(160))) { app.mods->uninstall(im.key); app.confirm_uninstall.clear(); }
+            ImGui::SameLine();
+            if (button("No", Btn::Ghost, true, px(70))) app.confirm_uninstall.clear();
+        } else if (button("Desinstalar", Btn::Ghost, !m.busy, px(140))) {
+            app.confirm_uninstall = im.key;
+        }
+        // Opciones de Riivolution: cuentan para la compatibilidad online.
+        if (in_profile && !changed) {
+            for (const auto& opt : im.json["options"].elements()) {
+                std::string id = opt["id"].str();
+                int pick = (int)opt["default"].num(0);
+                auto it = entry->choices.find(id);
+                if (it != entry->choices.end()) pick = it->second;
+                std::string current = pick > 0 && pick <= (int)opt["choices"].size() ? opt["choices"][(size_t)pick - 1]["name"].str() : "Desactivada";
+                ImGui::SetCursorPosX(px(56));
+                ImGui::SetNextItemWidth(px(260));
+                if (ImGui::BeginCombo((opt["name"].str() + "##" + id).c_str(), current.c_str())) {
+                    if (ImGui::Selectable("Desactivada", pick == 0)) { entry->choices[id] = 0; changed = true; }
+                    for (size_t c = 0; c < opt["choices"].size(); ++c)
+                        if (ImGui::Selectable(opt["choices"][c]["name"].str().c_str(), pick == (int)c + 1)) { entry->choices[id] = (int)c + 1; changed = true; }
+                    ImGui::EndCombo();
+                }
+            }
+        }
+        ImGui::PopID();
+        if (changed) break;   // el perfil ya cambió: se guarda y se redibuja
+    }
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+    if (changed) app.mods->save_profile(profile);
+}
+
 // ---------------------------------------------------------------- sala
 
 std::string seat_name(int seat) { return seat < 0 ? "Sin jugador" : "Jugador " + std::to_string(seat + 1); }
+
+// Token de sala = el del adaptador + fingerprint de los mods activos (si hay). El anfitrión, con el protocolo
+// de siempre, rechaza en el HELLO a quien no tenga exactamente el mismo conjunto: falla cerrado sin tocar el
+// netcode. Con perfil original el token no cambia (compatible con launchers sin mods).
+std::string room_token(App& app, const Game& g, const InstallStatus& s) {
+    std::string error;
+    app.room_fingerprint = active_fingerprint(g, &error);
+    if (!error.empty()) app.room_error = "Tu perfil de mods tiene un problema (" + error + "): arréglalo en Mods antes de jugar online.";
+    return mods::mod_compat_token(g.adapter->compat_token(s), app.room_fingerprint);
+}
+
+// Anfitrión: publica el manifiesto de su perfil de mods activo en el puerto de la sala + 10 (solo lectura).
+void start_manifest_server(App& app, const Game& g) {
+    app.manifest_server.reset();
+    if (!app.room || !mods::game_support(g.manifest.game_id)) return;
+    std::string id = g.manifest.game_id;
+    fs::path root = g.root;
+    std::string lobby = std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 1000000007);
+    auto server = std::make_unique<mods::ManifestServer>();
+    std::string error;
+    bool ok = server->start((uint16_t)(app.port + mods::kManifestPortOffset), [id, root, lobby] {
+        mods::ModStore store(id, mods::default_mods_root(id), mods::extracted_dir(id, root));
+        std::string e;
+        mods::Profile p;
+        if (!store.open(e) || !store.load_profile(store.active_profile(), p, e)) p = mods::Profile{};
+        return store.support().game_id.empty() ? std::string() : mods::build_session_manifest(store, p, lobby, p.epoch).dump();
+    }, error);
+    if (ok) app.manifest_server = std::move(server);
+    else app.room_error = "La sala funciona, pero los demás no podrán comparar mods contigo: " + error + ".";
+}
+
+void leave_room(App& app) {
+    if (app.room) app.room->leave();
+    app.room.reset();
+    app.manifest_server.reset();
+    app.auto_join_armed = false;
+    app.sync_consent = false;
+    if (app.room_game >= 0) {
+        Game& g = *app.games[app.room_game];
+        if (g.running_pid.load() == 0 && !g.preparing) end_mod_session(g);
+    }
+    if (app.mods) app.mods->clear_messages();
+}
 
 void open_room(App& app, bool host) {
     Game& g = *app.games[app.selected];
@@ -835,9 +1424,147 @@ void open_room(App& app, bool host) {
             std::lock_guard<std::mutex> lock(g.mutex);
             s = g.status;
         }
-        if (!app.room->host((uint16_t)app.port, app.name, g.adapter->compat_token(s), app.room_error)) app.room.reset();
+        if (!app.room->host((uint16_t)app.port, app.name, room_token(app, g, s), app.room_error)) app.room.reset();
         app.addresses = local_addresses();
+        start_manifest_server(app, g);
     }
+}
+
+void join_room(App& app, Game& g, const InstallStatus& s) {
+    app.room = g.adapter->make_room();
+    app.room_error.clear();
+    if (!app.room->join(app.address, (uint16_t)app.port, app.name, room_token(app, g, s), app.room_error)) app.room.reset();
+}
+
+const char* diff_text(mods::ModDiff d) {
+    switch (d) {
+        case mods::ModDiff::ExactMatch: return "Igual";
+        case mods::ModDiff::Missing: return "Te falta";
+        case mods::ModDiff::WrongVersion: return "Otra versión";
+        case mods::ModDiff::WrongHash: return "Mismo número de versión, contenido distinto";
+        case mods::ModDiff::Disabled: return "Lo tienes desactivado";
+        case mods::ModDiff::ExtraActive: return "Lo tienes activo y el anfitrión no";
+        case mods::ModDiff::LoadOrder: return "Otro orden de carga";
+        case mods::ModDiff::ConfigMismatch: return "Otras opciones";
+        case mods::ModDiff::Unsupported: return "No soportado";
+        case mods::ModDiff::NoAuthorizedSource: return "Te falta y no hay descarga autorizada";
+        case mods::ModDiff::IncompatibleGame: return "Juego o disco distinto";
+    }
+    return "?";
+}
+
+// Tarjeta «Mods de la sala» antes de unirse: compara con el anfitrión, explica cada diferencia y propone
+// arreglarla (perfil de sesión, descargas con consentimiento). El anfitrión nunca decide qué se descarga.
+void room_mods_card(App& app, Game& g, float x0, float width) {
+    if (!mods::game_support(g.manifest.game_id) || !mods::game_support(g.manifest.game_id)->proven) return;
+    if (!app.mods) app.mods = std::make_unique<ModsService>([] { wake(); });
+    if (app.mods_game != app.room_game) {
+        app.mods->open(g.manifest.game_id, g.manifest.display_name, g.root);
+        app.mods_game = app.room_game;
+    }
+    ModsSnapshot m = app.mods->snapshot();
+    ImGui::Dummy(ImVec2(0, px(6)));
+    ImGui::SetCursorPosX(x0);
+    ImGui::BeginChild("##roommods", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+    text(g_semibold, 15, P.text, "Mods de la sala");
+    ImGui::SetCursorPosX(px(22));
+    text(g_regular, 13, P.dim, "Compara tus mods con los del anfitrión antes de entrar. Solo se comparan listas y huellas: "
+                               "el anfitrión no te envía archivos ni puede hacer que descargues nada.", width - px(44));
+    ImGui::SetCursorPosX(px(22));
+    if (button("Comparar mods", Btn::Secondary, app.address[0] && !m.busy, px(170), "Escribe la dirección del anfitrión.")) {
+        app.sync_consent = false;
+        app.mods->session_compare(app.address, (uint16_t)app.port);
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Unirme automáticamente cuando todo esté listo", &app.auto_join);
+    if (m.busy) {
+        ImGui::SetCursorPosX(px(22));
+        std::string t = m.busy_text;
+        if (m.total) t += "  (" + std::to_string((int)(100.0 * m.done / m.total)) + " %)";
+        text(g_regular, 13.5f, P.accent, t.c_str(), width - px(44));
+        ImGui::SetCursorPosX(px(22));
+        if (button("Cancelar", Btn::Ghost, true, px(120))) { app.mods->cancel(); app.auto_join_armed = false; }
+    }
+    if (!m.error.empty() || !m.notice.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13.5f, m.error.empty() ? P.ok : P.bad, (m.error.empty() ? m.notice : m.error).c_str(), width - px(44));
+    }
+    if (m.session_checked && !m.session_error.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13.5f, P.warn, ("No se pudo comparar: " + m.session_error + ". Puedes intentar unirte igualmente: si los mods no coinciden, el anfitrión te rechazará.").c_str(), width - px(44));
+    } else if (m.session_checked) {
+        const mods::SessionDiff& d = m.session_diff;
+        int extra = d.extra, missing = d.missing, wrong = d.wrong, disabled = d.disabled;
+        std::string summary;
+        if (!d.game_ok) summary = d.game_problem;
+        else if (d.compatible) summary = "Tus mods coinciden con los del anfitrión (" + std::to_string(m.session_manifest.mods.size()) + "). Puedes unirte y ponerte Listo.";
+        else summary = "El anfitrión usa " + std::to_string(m.session_manifest.mods.size()) + " mods. Te faltan " + std::to_string(missing) + ", " +
+                       std::to_string(wrong) + " son distintos, " + std::to_string(disabled) + " los tienes desactivados y tienes " + std::to_string(extra) +
+                       " activos de más.";
+        ImGui::SetCursorPosX(px(22));
+        text(g_semibold, 14, d.compatible ? P.ok : P.warn, summary.c_str(), width - px(44));
+        for (const auto& it : d.items) {
+            if (it.state == mods::ModDiff::ExactMatch || it.state == mods::ModDiff::IncompatibleGame) continue;
+            ImGui::SetCursorPosX(px(34));
+            std::string line = (it.name.empty() ? it.id : it.name) + (it.wanted_version.empty() ? "" : " " + it.wanted_version) + " — " + diff_text(it.state);
+            if (!it.local_version.empty() && it.state != mods::ModDiff::ExtraActive) line += " (tienes " + it.local_version + ")";
+            if (!it.source.empty() && it.source != "local") line += " · fuente: " + it.source + (it.source_id.empty() ? "" : " " + it.source_id);
+            text(g_regular, 13, P.dim, line.c_str(), width - px(56));
+            if (!it.detail.empty()) {
+                ImGui::SetCursorPosX(px(46));
+                text(g_regular, 12, P.faint, it.detail.c_str(), width - px(68));
+            }
+        }
+        bool any_download = std::any_of(d.items.begin(), d.items.end(), [](const mods::DiffItem& it) { return it.downloadable; });
+        ImGui::SetCursorPosX(px(22));
+        if (d.game_ok && !d.compatible && d.session_ready) {
+            if (button("Usar los mods de la sala", Btn::Primary, !m.busy, px(250))) {
+                app.mods->session_use();
+                app.auto_join_armed = app.auto_join;
+                app.auto_session_tried = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Activa un perfil temporal igual al del anfitrión. Tu perfil habitual vuelve al salir.");
+        } else if (d.game_ok && !d.compatible && any_download && !m.sync_planned) {
+            if (button("Buscar los que faltan", Btn::Primary, !m.busy, px(230))) app.mods->sync_prepare();
+        }
+        if (m.sync_planned && !m.sync.empty()) {
+            uint64_t total = 0;
+            int ok = 0;
+            for (const auto& s : m.sync) {
+                ImGui::SetCursorPosX(px(34));
+                std::string line = s.name + ": " + (s.done ? "instalado" : s.ok ? s.file_name + " · " + human_size(s.size) + " · gamebanana.com/mods/" + std::to_string(s.mod_id) : s.reason);
+                text(g_regular, 13, s.done ? P.ok : s.ok ? P.text : P.warn, line.c_str(), width - px(56));
+                if (s.ok && !s.done) { total += s.size; ok++; }
+            }
+            if (ok > 0) {
+                ImGui::SetCursorPosX(px(22));
+                if (!app.sync_consent) {
+                    if (button(("Descargar " + std::to_string(ok) + " (" + human_size(total) + ")").c_str(), Btn::Primary, !m.busy, px(260))) app.sync_consent = true;
+                } else {
+                    text(g_regular, 13, P.warn, ("¿Descargar " + std::to_string(ok) + " mod(s), " + human_size(total) +
+                                                 ", desde gamebanana.com? Se comprueban antes de instalar; tu perfil habitual no cambia.").c_str(), width - px(44));
+                    ImGui::SetCursorPosX(px(22));
+                    if (button("Sí, descargar", Btn::Primary, !m.busy, px(170))) {
+                        app.mods->sync_run();
+                        app.sync_consent = false;
+                        app.auto_join_armed = app.auto_join;
+                        app.auto_session_tried = false;
+                    }
+                    ImGui::SameLine();
+                    if (button("No", Btn::Ghost, true, px(70))) app.sync_consent = false;
+                }
+            }
+        }
+    }
+    if (m.session_active) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 12.5f, P.accent, "Estás usando el perfil temporal de una sala.");
+        ImGui::SameLine();
+        if (button("Volver a mi perfil", Btn::Ghost, !m.busy, px(190))) app.mods->session_end();
+    }
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
 }
 
 void room_page(App& app, float width) {
@@ -850,8 +1577,7 @@ void room_page(App& app, float width) {
     float x0 = ImGui::GetCursorPosX();
     ImGui::SetCursorPos(ImVec2(x0, px(34)));
     if (button("‹ Volver", Btn::Ghost, true, px(110))) {
-        if (app.room) app.room->leave();
-        app.room.reset();
+        leave_room(app);
         app.page = Page::Game;
         return;
     }
@@ -860,6 +1586,15 @@ void room_page(App& app, float width) {
     ImGui::SetCursorPosX(x0);
     text(g_regular, 13.5f, P.dim,
          "Un jugador crea la sala y los demás se unen con su dirección (LAN o Hamachi). Todos necesitáis la misma build del juego.", width);
+    if (mods::game_support(g.manifest.game_id)) {
+        ImGui::SetCursorPosX(x0);
+        bool vanilla = app.room_fingerprint.empty() || app.room_fingerprint == mods::kVanilla;
+        text(g_regular, 13, vanilla ? P.faint : P.accent,
+             vanilla ? "Mods: ninguno. Solo podréis jugar juntos quienes tampoco tengáis mods activos."
+                     : ("Mods activos (" + app.room_fingerprint.substr(0, 12) + "). Solo entran quienes tengan exactamente los mismos mods, versiones y orden; "
+                        "si no, el anfitrión rechaza la conexión.").c_str(),
+             width);
+    }
     ImGui::Dummy(ImVec2(px(0), px(8)));
 
     RoomMode mode = app.room ? app.room->mode() : RoomMode::Idle;
@@ -885,16 +1620,16 @@ void room_page(App& app, float width) {
         ImGui::SetCursorPosX(px(22));
         ImGui::Dummy(ImVec2(px(0), px(4)));
         ImGui::SetCursorPosX(px(22));
-        if (button("Unirse", Btn::Primary, app.address[0] != 0, px(140), "Escribe la dirección del anfitrión.")) {
-            app.room = g.adapter->make_room();
-            app.room_error.clear();
-            if (!app.room->join(app.address, (uint16_t)app.port, app.name, g.adapter->compat_token(s), app.room_error)) app.room.reset();
-        }
+        if (button("Unirse", Btn::Primary, app.address[0] != 0, px(140), "Escribe la dirección del anfitrión.")) join_room(app, g, s);
         ImGui::SameLine();
         if (button("Crear sala", Btn::Secondary, true, px(140))) open_room(app, true);
         ImGui::Dummy(ImVec2(0, px(12)));
         ImGui::EndChild();
+        room_mods_card(app, g, x0, width);
         std::string msg = !app.room_error.empty() ? app.room_error : app.room ? app.room->status() : "";
+        // El rechazo por «otra versión» también llega cuando los mods no coinciden (el token incluye su huella).
+        if (!msg.empty() && mods::game_support(g.manifest.game_id) && msg.find("versi") != std::string::npos)
+            msg += " Si los dos tenéis el mismo juego, puede que vuestros mods sean distintos: pulsa «Comparar mods».";
         if (!msg.empty()) {
             ImGui::SetCursorPosX(x0);
             text(g_regular, 14, P.bad, msg.c_str(), width);
@@ -905,10 +1640,7 @@ void room_page(App& app, float width) {
         ImGui::SetCursorPosX(x0);
         text(g_regular, 15, P.dim, "Conectando con el anfitrión…");
         ImGui::SetCursorPosX(x0);
-        if (button("Cancelar", Btn::Secondary, true, px(140))) {
-            app.room->leave();
-            app.room.reset();
-        }
+        if (button("Cancelar", Btn::Secondary, true, px(140))) leave_room(app);
         return;
     }
 
@@ -983,10 +1715,7 @@ void room_page(App& app, float width) {
     } else {
         ImGui::SetCursorPosX(x0);
     }
-    if (button("Salir de la sala", Btn::Ghost, true, px(170))) {
-        room.leave();
-        app.room.reset();
-    }
+    if (button("Salir de la sala", Btn::Ghost, true, px(170))) leave_room(app);
 }
 
 }  // namespace
@@ -998,7 +1727,7 @@ int main(int argc, char** argv) {
     std::string manifests = WL_MANIFEST_DIR;
     std::string screenshot;
     int select = -1;
-    bool host_now = false;
+    bool host_now = false, mods_now = false;
     std::string post_update_journal, update_failed;
     bool auto_update = false, open_settings = false;
     // Modo aplicador: esta copia del exe sustituye los archivos del launcher y no abre ventana.
@@ -1024,6 +1753,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--screenshot") && i + 1 < argc) screenshot = argv[++i];
         else if (!std::strcmp(argv[i], "--select") && i + 1 < argc) select = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--host")) host_now = true;
+        else if (!std::strcmp(argv[i], "--mods")) mods_now = true;  // abre la página de Mods del juego elegido (pruebas y capturas)
         else if (!std::strcmp(argv[i], "--launcher-settings")) open_settings = true;  // abre Ajustes del launcher (pruebas y capturas)  // abre la sala del juego elegido (pruebas)
     }
     // Junto al exe hay una carpeta manifests/ en la versión instalable; en desarrollo se usa la del repo.
@@ -1105,6 +1835,7 @@ int main(int argc, char** argv) {
     std::snprintf(app.address, sizeof app.address, "%s", app.prefs.get("online_address").c_str());
     app.port = std::atoi(app.prefs.get("online_port", "47630").c_str());
     app.start_option = std::atoi(app.prefs.get("online_stability", "1").c_str());
+    for (auto& g : app.games) end_mod_session(*g);  // perfil temporal de una sala que quedó a medias (cierre inesperado)
     for (auto& g : app.games) probe(*g);  // en segundo plano: la ventana aparece sin esperar al disco
 
     // Autoactualización: estado, mensajes de una actualización anterior y comprobación en segundo plano.
@@ -1136,6 +1867,10 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 200 && !app.games[app.selected]->probed; ++i) SDL_Delay(5);
         if (app.games[app.selected]->adapter->make_room()) open_room(app, true);
     }
+    if (mods_now && mods::game_support(app.games[app.selected]->manifest.game_id)) {
+        open_mods(app);
+        for (int i = 0; i < 400 && (app.mods->snapshot().busy || !app.mods->snapshot().ready); ++i) SDL_Delay(5);
+    }
     SDL_ShowWindow(window);
     if (screenshot.empty() && post_update_journal.empty() && !auto_update) app.updates->start_auto();  // hilo aparte: no retrasa la ventana
     if (auto_update) app.updates->check_now();
@@ -1150,6 +1885,8 @@ int main(int argc, char** argv) {
         bool got = redraw > 0 || !screenshot.empty() ? SDL_PollEvent(&ev) : SDL_WaitEventTimeout(&ev, busy ? 33 : 1000);
         while (got) {
             ImGui_ImplSDL3_ProcessEvent(&ev);
+            // Arrastrar un ZIP o una carpeta a la ventana en la página de Mods = importar (con revisión previa).
+            if (ev.type == SDL_EVENT_DROP_FILE && app.page == Page::Mods && app.mods && ev.drop.data) app.mods->preview(fs::u8path(ev.drop.data));
             if (ev.type == SDL_EVENT_QUIT || (ev.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && ev.window.windowID == SDL_GetWindowID(window))) quit = true;
             redraw = 2;
             got = SDL_PollEvent(&ev);
@@ -1159,13 +1896,36 @@ int main(int argc, char** argv) {
             if (app.room->poll(start)) {
                 Game& g = *app.games[app.room_game];
                 auto spec = g.adapter->online(g.root, start);
-                if (spec) launch(g, *spec);
+                if (spec) launch_modded(g, *spec, app.room_fingerprint);
                 else app.room_error = "La sala empezó pero este PC no tiene puesto: no se abre el juego.";
                 app.page = Page::Game;
             }
             redraw = std::max(redraw, 1);
         }
         app.updates->pump();
+        // Mods de la sala: unirse solo, si se pidió, cuando la comparación diga que todo coincide (C17/C18).
+        if (app.auto_join_armed && app.mods && app.page == Page::Room && app.room_game >= 0 && (!app.room || app.room->mode() == RoomMode::Idle)) {
+            ModsSnapshot ms = app.mods->snapshot();
+            if (!ms.busy) {
+                Game& rg = *app.games[app.room_game];
+                if (ms.session_checked && ms.session_diff.compatible) {
+                    InstallStatus rs;
+                    {
+                        std::lock_guard<std::mutex> lock(rg.mutex);
+                        rs = rg.status;
+                    }
+                    app.auto_join_armed = false;
+                    join_room(app, rg, rs);
+                } else if (ms.session_checked && ms.session_diff.session_ready && !app.auto_session_tried) {
+                    app.auto_session_tried = true;
+                    app.mods->session_use();
+                } else {
+                    app.auto_join_armed = false;   // no se pudo dejar todo listo: el usuario decide
+                }
+            }
+        }
+        // El anfitrión deja de publicar su manifiesto cuando no hay sala.
+        if (app.manifest_server && (!app.room || app.room->mode() == RoomMode::Idle)) app.manifest_server.reset();
         {
             UpdateSnapshot us = app.updates->snapshot();
             if (us.state == UpdState::Downloading || us.state == UpdState::Verifying) redraw = std::max(redraw, 1);  // progreso
@@ -1200,6 +1960,8 @@ int main(int argc, char** argv) {
             room_page(app, width);
         } else if (app.page == Page::Launcher) {
             launcher_page(app, width);
+        } else if (app.page == Page::Mods && app.mods) {
+            mods_page(app, width);
         } else {
             game_page(app, *app.games[app.selected], width);
         }

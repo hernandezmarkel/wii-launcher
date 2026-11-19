@@ -70,9 +70,35 @@ if(MINGW)
     target_link_options(wl_release PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
+# ---- Mods (docs/mods/01-arquitectura.md). Subsistema aparte del updater: solo usa su SHA-256 y su HttpClient.
+# zlib: en MSYS2 viene con gcc; con el MinGW de nuwen, exportar ZLIB_ROOT=<MinGW> (tools/entorno-mods.ps1).
+set(ZLIB_USE_STATIC_LIBS ON)
+find_package(ZLIB REQUIRED)
+add_library(wl_mods STATIC
+    mods/src/json.cpp
+    mods/src/safe_path.cpp
+    mods/src/zip.cpp
+    mods/src/fst.cpp
+    mods/src/xml.cpp
+    mods/src/package.cpp
+    mods/src/store.cpp
+    mods/src/launch.cpp
+    mods/src/gamebanana.cpp
+    mods/src/session.cpp
+    mods/src/lobby_mods.cpp)
+target_include_directories(wl_mods PUBLIC mods/include)
+target_link_libraries(wl_mods PUBLIC wl_core wl_updater ZLIB::ZLIB)
+target_compile_options(wl_mods PRIVATE -Wall -Wextra)
+target_compile_definitions(wl_mods PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+add_executable(wlmods tools/wlmods.cpp)
+target_link_libraries(wlmods PRIVATE wl_mods)
+if(MINGW)
+    target_link_options(wlmods PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
 enable_testing()
-add_executable(wl_tests tests/tests.cpp tests/updater_tests.cpp)
-target_link_libraries(wl_tests PRIVATE wl_core wl_updater)
+add_executable(wl_tests tests/tests.cpp tests/updater_tests.cpp tests/mods_tests.cpp)
+target_link_libraries(wl_tests PRIVATE wl_core wl_updater wl_mods)
 add_test(NAME wl_tests COMMAND wl_tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
 # ---- Interfaz (opcional: -DWL_BUILD_APP=OFF compila solo el núcleo y los tests)
@@ -100,8 +126,8 @@ if(WL_BUILD_APP)
     target_compile_definitions(wl_imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS IMGUI_DISABLE_OBSOLETE_FUNCTIONS IMGUI_DISABLE_DEMO_WINDOWS IMGUI_DISABLE_DEBUG_TOOLS)
     target_link_libraries(wl_imgui PUBLIC SDL3::SDL3-static)
 
-    add_executable(wii_launcher WIN32 app/main.cpp app/prefs.cpp app/update_service.cpp)
-    target_link_libraries(wii_launcher PRIVATE wl_core wl_updater wl_imgui)
+    add_executable(wii_launcher WIN32 app/main.cpp app/prefs.cpp app/update_service.cpp app/mods_service.cpp)
+    target_link_libraries(wii_launcher PRIVATE wl_core wl_updater wl_mods wl_imgui)
     target_compile_options(wii_launcher PRIVATE -Wall -Wextra)
     set_target_properties(wii_launcher PROPERTIES OUTPUT_NAME "wii-launcher")
     if(MINGW)

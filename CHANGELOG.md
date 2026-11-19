@@ -6,6 +6,11 @@ solo una etiqueta `vX.Y.Z` aprobada publica algo.
 
 ## [Sin publicar]
 
+- Nueva página «Mods» en Wii Party: importa mods (ZIP o carpeta, también arrastrándolos), revísalos antes de instalar, actívalos o desactívalos, ordénalos y guarda perfiles. Tu disco y tus partidas no se tocan.
+- «Explorar» busca mods de Wii Party en GameBanana y te dice si funcionan con tu disco antes de descargar nada; los que llevan código, ejecutables o discos enteros se rechazan con el motivo.
+- «Actualizaciones» de mods bajo demanda: la versión anterior queda instalada para volver a ella.
+- Online con mods: solo entran en una sala quienes tengan exactamente los mismos mods. «Comparar mods» explica qué te falta y ofrece usar un perfil temporal igual al del anfitrión o descargar lo que falte (con tu permiso). Al salir vuelve tu perfil de siempre.
+
 ## [1.0.0] - pendiente de aprobación
 
 - El launcher se actualiza solo: comprueba al abrir (como mucho cada 6 horas) y te avisa sin interrumpir.

@@ -71,3 +71,6 @@ updater-signing*
 *.user
 Thumbs.db
 Desktop.ini
+/build-mods/
+/build-mods-app/
+/dist-pruebas/
