@@ -1,7 +1,7 @@
 # Paquete de instaladores que se mete en WiiPorts-<versión>.zip (tools/paquete-completo.sh).
 # Se publica una vez como release aparte (pre-release, etiqueta sin «v»: el updater la ignora) y aquí se fija su hash.
 # Contenido: instaladores de Mario Party 9 y Wii Party, instalador de Mario Kart Wii LAN (WiiCompiled + toolchain)
-# y servidor-mkw sin datos ni contraseñas. Origen: mkwii-recomp\lan\paquete y el paquete de clase, reducido con packaging/preparar-instaladores.ps1 (19/11/2026).
-tag=instaladores-2026-11-19
-asset=WiiPorts-instaladores-2026-11-19.zip
-sha256=6d370fdcfaf26b9e80fe6ffd22b5cca47137f3c3fb62b8e3f59abbd4fb024183
+# y servidor-mkw sin datos ni contraseñas. Origen: mkwii-recomp\lan\paquete y el paquete de clase, reducido con packaging/preparar-instaladores.ps1 (19/11/2026), con el instalador de MP9 5a2b71d (parche del online).
+tag=instaladores-2026-11-19-mp9
+asset=WiiPorts-instaladores-2026-11-19-mp9.zip
+sha256=21073350c302b13f3b5b5cdc7eea73a73b94ea2655d97674a929a4f6a62b2a0f

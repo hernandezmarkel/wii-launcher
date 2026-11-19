@@ -13,7 +13,13 @@ solo una etiqueta `vX.Y.Z` aprobada publica algo.
 - Las actualizaciones van firmadas y se verifican antes de instalarse; si algo falla, vuelve sola la versión anterior.
 - Solo se actualiza el launcher: juegos, partidas, salas y ajustes no se tocan.
 
-## [1.0.0-beta.3] - 2026-11-19
+## [1.0.0-beta.4] - 2026-11-19
+
+- Mario Party 9: parche de estabilidad del online. El launcher descarga solo el instalador nuevo; después pulsa «Instalar o actualizar» en Mario Party 9. Todos los jugadores de una sala deben tenerlo.
+- El launcher ya puede actualizar solo los instaladores de Mario Party 9 y Wii Party.
+- Descarga más ligera: el paquete completo pasa de 401 a unos 290 MB y cada actualización de unos 9 a unos 6 MB.
+
+## [1.0.0-beta.3] - 2026-11-19 (no publicada: sustituida por la beta.4)
 
 - Descarga más ligera: el paquete completo pasa de 401 a unos 285 MB y cada actualización de unos 9 a unos 6 MB.
 - El instalador de Mario Kart Wii ocupa 400 MB menos en disco: solo lleva el compilador para PCs de 64 bits.
