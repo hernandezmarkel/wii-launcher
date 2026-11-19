@@ -1627,6 +1627,9 @@ void room_page(App& app, float width) {
         ImGui::EndChild();
         room_mods_card(app, g, x0, width);
         std::string msg = !app.room_error.empty() ? app.room_error : app.room ? app.room->status() : "";
+        // El rechazo por «otra versión» también llega cuando los mods no coinciden (el token incluye su huella).
+        if (!msg.empty() && mods::game_support(g.manifest.game_id) && msg.find("versi") != std::string::npos)
+            msg += " Si los dos tenéis el mismo juego, puede que vuestros mods sean distintos: pulsa «Comparar mods».";
         if (!msg.empty()) {
             ImGui::SetCursorPosX(x0);
             text(g_regular, 14, P.bad, msg.c_str(), width);

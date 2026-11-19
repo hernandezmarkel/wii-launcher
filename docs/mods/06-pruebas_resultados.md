@@ -57,3 +57,23 @@ disco virtual (comprobado en el log), pero las frases cambiadas no aparecen en l
 (los rótulos del menú son texturas). No se usó como evidencia.
 
 Mario Party 9: mismo motor, **no declarado** hasta repetir esta prueba con su port (`proven = false`).
+
+## Sala simulada en un PC (`SIMULATED_NETWORK`, 19/11/2026)
+
+Dos launchers en el mismo portátil, por 127.0.0.1: el anfitrión con datos reales y el mod de textura activo
+(huella `0cd86023…`), el cliente con `WL_LOCALAPPDATA` aparte (sus propios mods y perfiles) y el mismo juego.
+Interfaz real, clicando (Windows-MCP). **No sustituye a la prueba con 2 PCs.**
+
+| Matriz | Paso | Resultado |
+|---|---|---|
+| — | Anfitrión abre sala | escucha en 47630 (sala) y 47640 (manifiesto de mods) |
+| C13 | Cliente sin mods pulsa Unirse | el anfitrión rechaza en el HELLO («otra versión»): no entra, no puede ponerse Listo |
+| C04/C14 | Comparar mods | «El anfitrión usa 1 mods. Te faltan 1…», «Prueba de textura 1.0.0 — te falta y no hay descarga autorizada» (importado a mano) |
+| C08 | Cliente importa el mismo ZIP sin activarlo y vuelve a comparar | «lo tienes desactivado», botón «Usar los mods de la sala» |
+| C16/C17 | «Usar los mods de la sala» con «Unirme automáticamente» marcado | perfil de sesión activo, huella igual y unión automática: el anfitrión lo acepta (2 jugadores en la sala) |
+| C20 | «Salir de la sala» | el cliente vuelve a su perfil `default`; `session.json` desaparece; el mod sigue instalado |
+
+Tras la prueba: el perfil `default` de Markel vuelve a estar sin mods y los datos del cliente simulado se borraron.
+Pruebas automáticas: 409/409 (incluye diff C01-C10, manifiestos hostiles D06/D07, canal TCP y perfil de sesión).
+
+Pendiente real (2 PCs): C22, C23 y la partida completa con un mod de gameplay.
