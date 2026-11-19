@@ -6,6 +6,7 @@ display_name = "Wii Party"
 status = "playable"
 adapter = "wiiparty"
 adapter_version = 1
+launcher_prefs = "wiiparty-online"
 install_folder = "WiiPartyOnline"
 executable = "bin/wiiparty.exe"
 working_dir = "."

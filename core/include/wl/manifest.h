@@ -23,6 +23,7 @@ struct Manifest {
     std::string notes;
     std::string lan_server_script;  // opcional (lan_wfc): servidor del anfitrión, relativo a la carpeta del launcher
     std::string installer;          // opcional: instalador incluido, relativo a la carpeta del launcher (.exe o .ps1)
+    std::string launcher_prefs;     // opcional: app del launcher individual (%APPDATA%\<app>\launcher\launcher.ini, clave root=)
 
     bool has(const std::string& capability) const;
 };

@@ -3,6 +3,15 @@
 // Bucle por eventos: sin entrada ni trabajo pendiente la ventana no redibuja (CPU ~0 en reposo).
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -281,6 +290,48 @@ void end_mod_session(const Game& g) {
     if (store.open(e)) store.end_session(e);
 }
 
+std::atomic<bool> g_minimize_launcher{false};
+
+// El online arranca el juego por un evento de red, no por un clic: Windows no le da el primer plano y su
+// ventana puede quedar detrás del launcher (el juego corre «invisible»). Se busca su ventana y se trae al
+// frente; si Windows no lo permite, el launcher se minimiza para que se vea.
+void bring_game_to_front(long long pid) {
+#ifdef _WIN32
+    AllowSetForegroundWindow(static_cast<DWORD>(pid));
+    std::thread([pid] {
+        struct Find { DWORD pid; HWND hwnd; };
+        for (int i = 0; i < 600; ++i) {   // hasta 60 s: en red el juego espera a los demás antes de abrir su ventana
+            Find f{static_cast<DWORD>(pid), nullptr};
+            EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+                auto* f = reinterpret_cast<Find*>(lp);
+                DWORD owner = 0;
+                GetWindowThreadProcessId(h, &owner);
+                if (owner == f->pid && IsWindowVisible(h) && !GetWindow(h, GW_OWNER)) { f->hwnd = h; return FALSE; }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&f));
+            if (f.hwnd) {
+                if (IsIconic(f.hwnd)) ShowWindow(f.hwnd, SW_RESTORE);
+                BringWindowToTop(f.hwnd);
+                SetForegroundWindow(f.hwnd);
+                if (GetForegroundWindow() != f.hwnd) {
+                    g_minimize_launcher = true;
+                    wake();
+                }
+                return;
+            }
+            DWORD code = 0;
+            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+            bool alive = h && GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+            if (h) CloseHandle(h);
+            if (!alive) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }).detach();
+#else
+    (void)pid;
+#endif
+}
+
 void launch(Game& g, const LaunchSpec& spec) {
     if (g.running_pid.load() != 0) {
         set_message(g, "El juego ya está abierto.", false);
@@ -295,6 +346,7 @@ void launch(Game& g, const LaunchSpec& spec) {
     }
     set_message(g, "Juego iniciado.", false);
     g.running_pid = p.pid;
+    bring_game_to_front(p.pid);
     // Un hilo espera a que el juego termine; la UI no se bloquea.
     std::thread([&g, pid = p.pid] {
         int code = wait_exit(pid, -1);
@@ -1935,6 +1987,7 @@ int main(int argc, char** argv) {
             redraw = std::max(redraw, 1);
         }
         app.updates->pump();
+        if (g_minimize_launcher.exchange(false)) SDL_MinimizeWindow(window);   // el juego no pudo pasar al frente
         // Mods de la sala: unirse solo, si se pidió, cuando la comparación diga que todo coincide (C17/C18).
         if (app.auto_join_armed && app.mods && app.page == Page::Room && app.room_game >= 0 && (!app.room || app.room->mode() == RoomMode::Idle)) {
             ModsSnapshot ms = app.mods->snapshot();

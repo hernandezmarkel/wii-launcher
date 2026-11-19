@@ -118,6 +118,33 @@ int main() {
     write(inst / "games" / "mp9" / "extracted" / "sys" / "boot.bin", "SSQP01");
     s = a->probe(install_root(m));
     CHECK(!s.ready() && s.problem.find("SSQP01") != std::string::npos);
+    // 9b. Carpeta cambiada en el launcher individual (root= en %APPDATA%\<app>\launcher\launcher.ini)
+    {
+        fs::path roam = fs::temp_directory_path() / "wl_tests_roaming";
+        fs::remove_all(roam);
+#ifdef _WIN32
+        _putenv_s("WL_APPDATA", roam.string().c_str());
+#else
+        setenv("WL_APPDATA", roam.c_str(), 1);
+#endif
+        Manifest mp = m;
+        mp.launcher_prefs = "mp9-online";
+        CHECK(install_root(mp) == lad / "MarioParty9Online");              // sin launcher.ini: la de siempre
+        fs::path moved = fs::temp_directory_path() / "wl_tests_moved" / "MarioParty9Online";
+        write(roam / "mp9-online" / "launcher" / "launcher.ini", "disc=C:\\x.wbfs\r\nroot=" + moved.u8string() + "\r\n");
+        CHECK(install_root(mp) == moved.lexically_normal());               // la elegida por el usuario
+        InstallStatus ms = a->probe(install_root(mp));
+        CHECK(!ms.folder && !ms.ready());                                  // vacía: «no instalado», sin mirar la de siempre
+        CHECK(!fs::exists(moved));                                         // y sin crear nada
+        write(roam / "mp9-online" / "launcher" / "launcher.ini", "root=relativa\\carpeta\n");
+        CHECK(install_root(mp) == lad / "MarioParty9Online");              // solo rutas absolutas
+        write(roam / "mp9-online" / "launcher" / "launcher.ini", "root=\n");
+        CHECK(install_root(mp) == lad / "MarioParty9Online");
+        CHECK(!parse_manifest(with("install_folder", "install_folder = \"MarioParty9Online\"\nlauncher_prefs = \"../x\"")).ok);
+        CHECK(parse_manifest(with("install_folder", "install_folder = \"MarioParty9Online\"\nlauncher_prefs = \"mp9-online\"")).ok);
+        fs::remove_all(roam);
+        fs::remove_all(moved.parent_path());
+    }
     LaunchSpec off = a->offline(inst);
     CHECK(off.executable.filename() == "mp9.exe");
     CHECK(off.env.count("WP_LOG_FILE") && !off.env.count("WP_NET_SEAT"));

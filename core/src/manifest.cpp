@@ -194,6 +194,7 @@ ManifestResult parse_manifest(const std::string& text) {
     text_of("notes", false, m.notes);
     text_of("installer", false, m.installer);
     text_of("lan_server_script", false, m.lan_server_script);
+    text_of("launcher_prefs", false, m.launcher_prefs);
     for (const auto& [key, _] : values) r.errors.push_back("clave desconocida '" + key + "'");
 
     if (m.manifest_version != 1) r.errors.push_back("manifest_version no soportada (solo 1)");
@@ -217,6 +218,8 @@ ManifestResult parse_manifest(const std::string& text) {
             r.errors.push_back("lan_server_script debe ser una ruta relativa segura a un .ps1");
         if (!m.has("lan_wfc")) r.errors.push_back("lan_server_script necesita la capacidad 'lan_wfc'");
     }
+    if (!m.launcher_prefs.empty() && !std::regex_match(m.launcher_prefs, std::regex("[a-z0-9-]{1,40}")))
+        r.errors.push_back("launcher_prefs debe ser [a-z0-9-]{1,40}");
     if (!known(kAdapters, m.adapter)) r.errors.push_back("adaptador desconocido '" + m.adapter + "'");
     if (m.max_players < 1 || m.max_players > 12) r.errors.push_back("max_players fuera de 1..12");
     for (const auto& c : m.capabilities) {
