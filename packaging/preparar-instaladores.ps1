@@ -30,6 +30,7 @@ function Size($p) { (Get-ChildItem $p -Recurse -File -Force | Measure-Object Len
 
 # 1. Copia
 Copy-Item "$Clase\instaladores\mp9online-launcher.exe", "$Clase\instaladores\wiipartyrecomp-launcher.exe" "$st\instaladores\"
+if ($Mp9Exe) { Copy-Item $Mp9Exe "$st\instaladores\mp9online-launcher.exe" -Force }
 Copy-Item -Recurse "$Clase\instaladores\licencias" "$st\instaladores\licencias"
 robocopy "$MkwPaquete\instalador" "$st\instaladores\mkwii" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 /XD obj | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy instalador: $LASTEXITCODE" }
