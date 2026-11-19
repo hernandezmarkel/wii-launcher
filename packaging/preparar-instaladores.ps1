@@ -20,7 +20,8 @@ param(
     [Parameter(Mandatory)] [string]$MkwPaquete,
     [Parameter(Mandatory)] [string]$Salida,
     [Parameter(Mandatory)] [string]$Fecha,
-    [string]$Mp9Exe = ""   # mp9online-launcher.exe nuevo (p. ej. con el parche del online); por defecto, el del paquete de clase
+    [string]$Mp9Exe = "",   # mp9online-launcher.exe nuevo (p. ej. con el parche del online); por defecto, el del paquete de clase
+    [string]$WpExe = ""    # wiipartyrecomp-launcher.exe nuevo; por defecto, el del paquete de clase
 )
 $ErrorActionPreference = 'Stop'
 $st = Join-Path $Salida "instaladores-$Fecha"
@@ -31,6 +32,7 @@ function Size($p) { (Get-ChildItem $p -Recurse -File -Force | Measure-Object Len
 # 1. Copia
 Copy-Item "$Clase\instaladores\mp9online-launcher.exe", "$Clase\instaladores\wiipartyrecomp-launcher.exe" "$st\instaladores\"
 if ($Mp9Exe) { Copy-Item $Mp9Exe "$st\instaladores\mp9online-launcher.exe" -Force }
+if ($WpExe) { Copy-Item $WpExe "$st\instaladores\wiipartyrecomp-launcher.exe" -Force }
 Copy-Item -Recurse "$Clase\instaladores\licencias" "$st\instaladores\licencias"
 robocopy "$MkwPaquete\instalador" "$st\instaladores\mkwii" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 /XD obj | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy instalador: $LASTEXITCODE" }

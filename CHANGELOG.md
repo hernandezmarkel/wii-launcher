@@ -6,6 +6,13 @@ solo una etiqueta `vX.Y.Z` aprobada publica algo.
 
 ## [Sin publicar]
 
+## [1.0.0-beta.5] - 2026-11-19
+
+- Online: al empezar la partida desde la sala, la ventana del juego pasa al frente (o se minimiza el launcher).
+- Mario Party 9 y Wii Party: el launcher usa la carpeta de instalación que eligieras en el instalador de cada juego.
+- Instaladores de Mario Party 9 y Wii Party: comprueban que puedes escribir en la carpeta elegida antes de empezar. No hace falta recompilar los juegos y las salas siguen siendo compatibles.
+- Servidor de Mario Kart Wii LAN: si queda en marcha una copia anterior del servidor, se apaga antes de arrancar la nueva, y un primer arranque interrumpido se repara solo.
+
 ## [1.0.0] - pendiente de aprobación
 
 - El launcher se actualiza solo: comprueba al abrir (como mucho cada 6 horas) y te avisa sin interrumpir.
