@@ -106,7 +106,8 @@ std::unique_ptr<GameAdapter> make_adapter(const Manifest& manifest);
 
 // Utilidades comunes para adaptadores (install.cpp).
 fs::path local_app_data();  // %LOCALAPPDATA% (o WL_LOCALAPPDATA para pruebas)
-fs::path install_root(const Manifest& manifest);
+fs::path roaming_app_data();  // %APPDATA% (o WL_APPDATA para pruebas)
+fs::path install_root(const Manifest& manifest);  // root= del launcher individual si lo hay; si no, %LOCALAPPDATA%\<install_folder>
 std::string read_first_line(const fs::path& path);
 std::string read_disc_id(const fs::path& boot_bin);
 // Resuelve una ruta relativa del manifest y comprueba que queda dentro de la raíz.

@@ -5,6 +5,7 @@ display_name = "Mario Party 9"
 status = "in_development"
 adapter = "mp9"
 adapter_version = 1
+launcher_prefs = "mp9-online"
 install_folder = "MarioParty9Online"
 executable = "bin/mp9.exe"
 working_dir = "."
