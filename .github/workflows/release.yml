@@ -128,9 +128,11 @@ jobs:
         run: |
           [ -n "$WL_UPDATE_SIGNING_KEY" ] || { echo "Falta el secreto WL_UPDATE_SIGNING_KEY en el entorno release"; exit 1; }
           ./dist/wl_release.exe sign dist/assets/update.txt
+          ./dist/wl_release.exe sign dist/assets/instaladores.txt
           unset WL_UPDATE_SIGNING_KEY
           pub=$(sed -n 's/^pubkey=//p' dist/updater-build.txt)
           ./dist/wl_release.exe verify dist/assets/update.txt dist/assets/update.txt.sig "$pub" 0.0.0 beta
+          ./dist/wl_release.exe verify-installers dist/assets/instaladores.txt dist/assets/instaladores.txt.sig "$pub" "${TAG#v}"
           (cd dist/assets && sha256sum * > ../SHA256SUMS.txt)
           (cd dist && sha256sum WiiLauncher-*-actualizacion.zip WiiPorts-*.zip >> SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt

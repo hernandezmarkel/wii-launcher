@@ -19,7 +19,8 @@ param(
     [Parameter(Mandatory)] [string]$Clase,
     [Parameter(Mandatory)] [string]$MkwPaquete,
     [Parameter(Mandatory)] [string]$Salida,
-    [Parameter(Mandatory)] [string]$Fecha
+    [Parameter(Mandatory)] [string]$Fecha,
+    [string]$Mp9Exe = ""   # mp9online-launcher.exe nuevo (p. ej. con el parche del online); por defecto, el del paquete de clase
 )
 $ErrorActionPreference = 'Stop'
 $st = Join-Path $Salida "instaladores-$Fecha"
