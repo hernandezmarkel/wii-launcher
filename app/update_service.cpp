@@ -130,6 +130,23 @@ void UpdateService::run_check(bool manual) {
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         upd::log("comprobación " + std::string(manual ? "manual" : "automática") + " (" + feed.channel + "): " +
                  std::to_string((int)c.kind) + " en " + std::to_string((int)ms) + " ms" + (c.error.empty() ? "" : " - " + c.error));
+        // Launcher al día: se actualizan los instaladores pequeños de su misma Release (p. ej. un parche del online de MP9).
+        std::string installers_note;
+        if (c.kind == upd::CheckKind::UpToDate && upd::folder_writable(install)) {
+            upd::InstallersResult ir = upd::update_installers(*http, feed, install, policy.installed, policy.public_key);
+            auto game = [](const std::string& path) {
+                if (path.find("mp9") != std::string::npos) return std::string("Mario Party 9");
+                if (path.find("wiiparty") != std::string::npos) return std::string("Wii Party");
+                return path;
+            };
+            for (const auto& p : ir.updated)
+                installers_note += (installers_note.empty() ? "" : " ") + std::string("Se ha actualizado el instalador de ") + game(p) +
+                                   ": pulsa «Instalar o actualizar» en su ficha para aplicar los cambios al juego.";
+            for (const auto& p : ir.busy)
+                installers_note += (installers_note.empty() ? "" : " ") + std::string("Hay un instalador nuevo de ") + game(p) +
+                                   ", pero está abierto: ciérralo y vuelve a buscar actualizaciones.";
+            if (!ir.ok) upd::log("instaladores: " + ir.error);
+        }
         uint64_t to_download = 0;
         if (c.kind == upd::CheckKind::Available) {
             std::error_code e;
@@ -171,6 +188,7 @@ void UpdateService::run_check(bool manual) {
                 case upd::CheckKind::NoReleases:
                     snap.state = UpdState::UpToDate;
                     snap.info = c.kind == upd::CheckKind::NoReleases ? "Todavía no hay versiones publicadas." : "";
+                    if (!installers_note.empty()) snap.installers_note = installers_note;
                     break;
                 case upd::CheckKind::RateLimited:
                     s->pending_prefs["update.next_allowed"] = std::to_string(now + c.retry_after_s);

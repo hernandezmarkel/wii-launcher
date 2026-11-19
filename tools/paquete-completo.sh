@@ -20,6 +20,9 @@ done
 if find "$full" -type f \( -iname '*.iso' -o -iname '*.wbfs' -o -iname '*.rvz' -o -iname '*.wia' -o -iname '*.dol' -o -iname '*.rel' \) | grep -q .; then
     echo "ERROR: hay archivos de disco o del juego en el paquete"; exit 1
 fi
+# Manifiesto aparte de los instaladores pequeños (MP9, Wii Party) para que el launcher (>= beta.4) los actualice solo.
+case "$ver" in *-*) channel=beta ;; *) channel=stable ;; esac
+"$out/wl_release.exe" pack-installers "$full" "$out/assets" "$ver" "$channel"
 if command -v zip > /dev/null; then
     (cd "$out" && rm -f "WiiPorts-$ver.zip" && zip -qr -9 "WiiPorts-$ver.zip" "WiiPorts-$ver")
 else

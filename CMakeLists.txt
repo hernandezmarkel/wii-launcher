@@ -58,7 +58,8 @@ add_library(wl_updater STATIC
     updater/src/update_manifest.cpp
     updater/src/http_win.cpp
     updater/src/feed.cpp
-    updater/src/apply.cpp)
+    updater/src/apply.cpp
+    updater/src/installers.cpp)
 target_include_directories(wl_updater PUBLIC updater/include PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(wl_updater PUBLIC wl_core winhttp bcrypt)
 target_compile_options(wl_updater PRIVATE -Wall -Wextra)

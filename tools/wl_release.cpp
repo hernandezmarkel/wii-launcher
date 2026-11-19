@@ -118,6 +118,46 @@ int main(int argc, char** argv) {
         std::cout << "update.txt: " << version << " (" << channel << "), " << files << " archivos, " << check.total_size() << " bytes\n";
         return 0;
     }
+    if (cmd == "pack-installers" && argc == 6) {
+        // wl_release pack-installers <carpeta con instaladores/> <salida> <versión> <canal>: instaladores.txt (sin firmar)
+        fs::path src = fs::u8path(argv[2]), out = fs::u8path(argv[3]);
+        std::string version = argv[4], channel = argv[5];
+        std::error_code e;
+        fs::create_directories(out, e);
+        std::ostringstream m;
+        m << "format = 1\napp = " << kInstallersAppId << "\nchannel = " << channel << "\nversion = " << version << "\nplatform = " << kPlatform << "\n";
+        int files = 0;
+        for (const auto& entry : fs::directory_iterator(src / "instaladores", e)) {
+            if (!entry.is_regular_file()) continue;
+            std::string rel = "instaladores/" + entry.path().filename().u8string();
+            if (!allowed_installer_path(rel)) continue;
+            std::string asset = asset_for(rel);
+            fs::copy_file(entry.path(), out / fs::u8path(asset), fs::copy_options::overwrite_existing, e);
+            if (e) {
+                std::cerr << "no se pudo copiar " << rel << "\n";
+                return 1;
+            }
+            m << "file = " << sha256_file_hex(entry.path()) << " " << fs::file_size(entry.path()) << " " << asset << " " << rel << "\n";
+            ++files;
+        }
+        std::string text = m.str();
+        UpdateManifest check;
+        std::string err;
+        if (files == 0 || !parse_manifest_text(text, check, err, true)) {
+            std::cerr << "manifiesto de instaladores inválido: " << (files ? err : "no hay instaladores .exe") << "\n";
+            return 1;
+        }
+        std::ofstream(out / "instaladores.txt", std::ios::binary) << text;
+        std::cout << "instaladores.txt: " << files << " instaladores, " << check.total_size() << " bytes\n";
+        return 0;
+    }
+    if (cmd == "verify-installers" && argc == 6) {
+        std::string sig = slurp(fs::u8path(argv[3]));
+        while (!sig.empty() && (sig.back() == '\n' || sig.back() == '\r')) sig.pop_back();
+        VerifyResult r = verify_installers_manifest(slurp(fs::u8path(argv[2])), sig, argv[4], argv[5]);
+        std::cout << (r.ok ? "OK instaladores " + r.manifest.version : "RECHAZADO: " + r.error) << "\n";
+        return r.ok ? 0 : 1;
+    }
     if (cmd == "sign" && argc == 3) {
         std::string key;
         if (const char* k = std::getenv("WL_UPDATE_SIGNING_KEY")) key = k;

@@ -24,6 +24,7 @@ struct UpdateSnapshot {
     bool auto_check = true;
     bool enabled = true;         // false si esta copia no tiene repo o clave
     bool quiet_error = false;    // error de una comprobación automática: no se muestra fuera de Ajustes
+    std::string installers_note; // instaladores de juegos actualizados en esta sesión (qué hacer a continuación)
 };
 
 class UpdateService {

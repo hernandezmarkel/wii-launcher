@@ -63,7 +63,15 @@ bool allowed_update_path(const std::string& path) {
     return false;
 }
 
-bool parse_manifest_text(const std::string& text, UpdateManifest& out, std::string& error) {
+// Instaladores pequeños (manifiesto aparte): solo instaladores/<nombre>.exe, y nunca el de Mario Kart (carpeta).
+bool allowed_installer_path(const std::string& path) {
+    const std::string prefix = "instaladores/";
+    if (path.rfind(prefix, 0) != 0) return false;
+    std::string name = path.substr(prefix.size());
+    return name.find('/') == std::string::npos && simple_name(name, 64) && ends_with(name, ".exe");
+}
+
+bool parse_manifest_text(const std::string& text, UpdateManifest& out, std::string& error, bool installers) {
     UpdateManifest m;
     if (text.size() > kMaxManifestBytes) {
         error = "El manifiesto de actualización es demasiado grande.";
@@ -113,7 +121,7 @@ bool parse_manifest_text(const std::string& text, UpdateManifest& out, std::stri
                 return false;
             }
             uf.size = std::stoull(size);
-            if (!allowed_update_path(uf.path)) {
+            if (installers ? !allowed_installer_path(uf.path) : !allowed_update_path(uf.path)) {
                 error = "Ruta no permitida en la actualización: " + uf.path;
                 return false;
             }
@@ -165,7 +173,7 @@ bool parse_manifest_text(const std::string& text, UpdateManifest& out, std::stri
         error = "min_from inválido en el manifiesto.";
         return false;
     }
-    if (!paths.count("wii-launcher.exe")) {
+    if (!installers && !paths.count("wii-launcher.exe")) {
         error = "La actualización no contiene wii-launcher.exe.";
         return false;
     }
@@ -226,6 +234,32 @@ VerifyResult verify_manifest(const std::string& text, const std::string& signatu
     }
     if (!m.min_from.empty() && compare_versions(policy.installed, m.min_from) < 0) {
         r.error = "Esta versión necesita instalar antes la " + m.min_from + " a mano (ver guía).";
+        return r;
+    }
+    r.ok = true;
+    return r;
+}
+
+VerifyResult verify_installers_manifest(const std::string& text, const std::string& signature_hex, const std::string& public_key,
+                                        const std::string& installed_version) {
+    VerifyResult r;
+    if (public_key.empty() || text.size() > kMaxManifestBytes || signature_hex.size() > 200) {
+        r.error = "Manifiesto de instaladores inválido.";
+        return r;
+    }
+    if (!ecdsa_verify(public_key, text, signature_hex)) {
+        r.error = "La firma del manifiesto de instaladores no es válida. No se instala nada.";
+        return r;
+    }
+    if (!parse_manifest_text(text, r.manifest, r.error, true)) return r;
+    const UpdateManifest& m = r.manifest;
+    if (m.app != kInstallersAppId || m.platform != kPlatform) {
+        r.error = "El manifiesto de instaladores es de otra aplicación o plataforma.";
+        return r;
+    }
+    // Ligado a la Release de esta versión: un manifiesto viejo o de otra versión no se acepta (anti-replay).
+    if (compare_versions(m.version, installed_version) != 0 || m.version != installed_version) {
+        r.error = "El manifiesto de instaladores no corresponde a esta versión del launcher.";
         return r;
     }
     r.ok = true;

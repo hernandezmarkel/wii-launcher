@@ -76,10 +76,33 @@ struct VerifyResult {
 };
 
 // Sin verificar firma: solo formato. Lo usan verify_manifest() y la herramienta de release.
-bool parse_manifest_text(const std::string& text, UpdateManifest& out, std::string& error);
+// installers = true: manifiesto de instaladores (instaladores.txt), con su propia lista de rutas.
+bool parse_manifest_text(const std::string& text, UpdateManifest& out, std::string& error, bool installers = false);
 // Firma + formato + app/plataforma/canal + versión + rutas + límites. Nunca lanza.
 VerifyResult verify_manifest(const std::string& text, const std::string& signature_hex, const VerifyPolicy& policy);
 bool allowed_update_path(const std::string& path);
+
+// ------------------------------------------------------------------ instaladores pequeños (desde 1.0.0-beta.4)
+// Manifiesto aparte (instaladores.txt + .sig) en cada Release, para que las versiones antiguas, que solo conocen las
+// rutas del launcher, no rechacen la actualización. Solo instaladores/<nombre>.exe (MP9 y Wii Party); nunca juegos ni
+// el instalador de Mario Kart. Va ligado a la versión: solo se acepta el de la Release de la versión instalada.
+constexpr const char* kInstallersAppId = "wii-launcher-instaladores";
+bool allowed_installer_path(const std::string& path);
+VerifyResult verify_installers_manifest(const std::string& text, const std::string& signature_hex, const std::string& public_key,
+                                        const std::string& installed_version);
+
+struct InstallersResult {
+    bool ok = true;                       // false = error (de red o de verificación); la instalación queda como estaba
+    std::vector<std::string> updated;     // rutas actualizadas, p. ej. instaladores/mp9online-launcher.exe
+    std::vector<std::string> busy;        // no se cambiaron porque ese instalador está abierto
+    std::string error;
+};
+struct FeedConfig;
+class HttpClient;
+// Descarga, verifica y coloca los instaladores pequeños que hayan cambiado en la Release de la versión instalada.
+// 404 (Release sin instaladores.txt) = nada que hacer. No toca un instalador que esté en ejecución.
+InstallersResult update_installers(HttpClient& http, const FeedConfig& feed, const fs::path& install_dir,
+                                   const std::string& installed_version, const std::string& public_key);
 bool allowed_asset_name(const std::string& name);
 
 // ------------------------------------------------------------------ HTTP

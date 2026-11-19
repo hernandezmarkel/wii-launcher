@@ -200,6 +200,7 @@ struct App {
     // Autoactualización del launcher (solo el launcher; nunca los juegos).
     std::unique_ptr<UpdateService> updates;
     bool update_later = false;      // «Más tarde»: no se vuelve a mostrar el aviso en esta sesión
+    std::string installers_seen;    // aviso de instaladores ya leído (Entendido)
     std::string update_notice;      // resultado de una actualización anterior (éxito, fallo o recuperación)
     bool update_notice_bad = false;
     std::string update_why_not;     // por qué no se puede aplicar ahora
@@ -559,10 +560,34 @@ void try_apply(App& app) {
 }
 
 // Aviso discreto abajo a la derecha cuando hay versión nueva. No bloquea nada; «Más tarde» lo oculta en esta sesión.
+// Aviso de instaladores de juegos actualizados (p. ej. parche del online de MP9): qué hacer para aplicarlo.
+void installers_toast(App& app, const ImVec2& display, const UpdateSnapshot& u) {
+    if (u.installers_note.empty() || app.installers_seen == u.installers_note) return;
+    ImGui::SetNextWindowPos(ImVec2(display.x - px(24), display.y - px(24)), ImGuiCond_Always, ImVec2(1, 1));
+    ImGui::SetNextWindowSize(ImVec2(px(400), 0));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, v4(P.card));
+    ImGui::PushStyleColor(ImGuiCol_Border, v4(P.ok));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(18), px(16)));
+    ImGui::Begin("##installers_toast", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings);
+    text(g_semibold, 15, P.text, "Instalador actualizado");
+    text(g_regular, 13, P.dim, u.installers_note.c_str(), px(360));
+    ImGui::Dummy(ImVec2(0, px(2)));
+    if (button("Entendido", Btn::Primary, true, px(130))) app.installers_seen = u.installers_note;
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+}
+
 void update_toast(App& app, const ImVec2& display) {
-    if (!app.updates || app.update_later || app.page == Page::Launcher) return;
+    if (!app.updates || app.page == Page::Launcher) return;
     UpdateSnapshot u = app.updates->snapshot();
-    if (u.state != UpdState::Available && u.state != UpdState::Ready) return;
+    if (u.state != UpdState::Available && u.state != UpdState::Ready) {
+        installers_toast(app, display, u);
+        return;
+    }
+    if (app.update_later) return;
     ImGui::SetNextWindowPos(ImVec2(display.x - px(24), display.y - px(24)), ImGuiCond_Always, ImVec2(1, 1));
     ImGui::SetNextWindowSize(ImVec2(px(400), 0));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, v4(P.card));
@@ -638,6 +663,10 @@ void launcher_page(App& app, float width) {
     ImGui::Dummy(ImVec2(0, px(4)));
     ImGui::SetCursorPosX(px(22));
     text(g_regular, 14, color, status.c_str(), inner);
+    if (!u.installers_note.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13, P.ok, u.installers_note.c_str(), inner);
+    }
     if (u.state == UpdState::Available && !u.info.empty()) {
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 12.5f, P.faint, u.info.c_str(), inner);

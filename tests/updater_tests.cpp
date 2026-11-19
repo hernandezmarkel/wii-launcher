@@ -307,6 +307,60 @@ void run_updater_tests() {
         b.release();
         _putenv_s("WL_LOCALAPPDATA", saved.c_str());
     }
+    // ---- instaladores pequeños (manifiesto aparte, desde beta.4)
+    UCHECK(allowed_installer_path("instaladores/mp9online-launcher.exe") && allowed_installer_path("instaladores/wiipartyrecomp-launcher.exe"));
+    UCHECK(!allowed_installer_path("instaladores/mkwii/Instalar-MKWii-LAN.ps1") && !allowed_installer_path("instaladores/../wii-launcher.exe") &&
+           !allowed_installer_path("wii-launcher.exe") && !allowed_installer_path("instaladores/x.ps1") && !allowed_update_path("instaladores/mp9online-launcher.exe"));
+    {
+        const char* old_lad = std::getenv("WL_LOCALAPPDATA");
+        std::string saved = old_lad ? old_lad : "";
+        _putenv_s("WL_LOCALAPPDATA", (root / "lad2").u8string().c_str());
+        const std::string mp9v1 = "MZ instalador mp9 viejo", mp9v2 = "MZ instalador mp9 con parche online", wp = "MZ instalador wiiparty";
+        auto inst_manifest = [&](const std::string& ver, const std::string& app) {
+            return "format = 1\napp = " + app + "\nchannel = beta\nversion = " + ver + "\nplatform = windows-x86_64\n" +
+                   file_line(mp9v2, "instaladores.mp9online-launcher.exe", "instaladores/mp9online-launcher.exe") +
+                   file_line(wp, "instaladores.wiipartyrecomp-launcher.exe", "instaladores/wiipartyrecomp-launcher.exe");
+        };
+        std::string im = inst_manifest("1.0.0-beta.4", kInstallersAppId);
+        UCHECK(verify_installers_manifest(im, sign(im), g_pub, "1.0.0-beta.4").ok);
+        UCHECK(!verify_installers_manifest(im, sign(im), g_pub, "1.0.0-beta.5").ok);   // ligado a su versión (anti-replay)
+        UCHECK(!verify_installers_manifest(im, sign(good), g_pub, "1.0.0-beta.4").ok); // firma de otro texto
+        std::string wrong_app = inst_manifest("1.0.0-beta.4", "wii-launcher");
+        UCHECK(!verify_installers_manifest(wrong_app, sign(wrong_app), g_pub, "1.0.0-beta.4").ok);
+        std::string sneaky = im + file_line("x", "wii-launcher.exe", "wii-launcher.exe");  // no puede colar el exe del launcher
+        UCHECK(!verify_installers_manifest(sneaky, sign(sneaky), g_pub, "1.0.0-beta.4").ok);
+        UpdateManifest um;
+        std::string uerr;
+        UCHECK(!parse_manifest_text(im, um, uerr));  // un launcher viejo lo rechazaría: por eso va en otro archivo
+
+        fs::create_directories(install / "instaladores", e);
+        std::ofstream(install / "instaladores" / "mp9online-launcher.exe", std::ios::binary) << mp9v1;
+        std::ofstream(install / "instaladores" / "wiipartyrecomp-launcher.exe", std::ios::binary) << wp;  // igual: no se baja
+        const std::string base = "https://github.com/dueno/wii-launcher/releases/download/v1.0.0-beta.4/";
+        FakeHttp http;
+        http.routes[base + "instaladores.txt"] = {404, "", {}};
+        InstallersResult ir = update_installers(http, feed, install, "1.0.0-beta.4", g_pub);
+        UCHECK(ir.ok && ir.updated.empty());  // Release sin instaladores.txt: nada que hacer
+        http.routes[base + "instaladores.txt"] = {200, im, {}};
+        http.routes[base + "instaladores.txt.sig"] = {200, sign(im), {}};
+        http.routes[base + "instaladores.mp9online-launcher.exe"] = {200, mp9v2.substr(0, 10), {}};  // truncado
+        ir = update_installers(http, feed, install, "1.0.0-beta.4", g_pub);
+        std::ifstream a(install / "instaladores" / "mp9online-launcher.exe", std::ios::binary);
+        UCHECK(!ir.ok && std::string((std::istreambuf_iterator<char>(a)), {}) == mp9v1);  // el viejo sigue intacto
+        a.close();
+        http.routes[base + "instaladores.mp9online-launcher.exe"] = {200, mp9v2, {}};
+        ir = update_installers(http, feed, install, "1.0.0-beta.4", g_pub);
+        std::ifstream b(install / "instaladores" / "mp9online-launcher.exe", std::ios::binary);
+        UCHECK(ir.ok && ir.updated.size() == 1 && ir.updated[0] == "instaladores/mp9online-launcher.exe" &&
+               std::string((std::istreambuf_iterator<char>(b)), {}) == mp9v2);
+        b.close();
+        UCHECK(http.count(base + "instaladores.wiipartyrecomp-launcher.exe") == 0);  // sin cambios: no se descarga
+        UCHECK(fs::exists(install / ".wl-backup" / "instaladores" / "mp9online-launcher.exe", e));
+        ir = update_installers(http, feed, install, "1.0.0-beta.4", g_pub);
+        UCHECK(ir.ok && ir.updated.empty());  // segunda vez: nada
+        _putenv_s("WL_LOCALAPPDATA", saved.c_str());
+    }
+
     UCHECK(folder_writable(install));
     UCHECK(redact(std::string(std::getenv("USERPROFILE") ? std::getenv("USERPROFILE") : "C:/x") + "\\a").find("%USERPROFILE%") != std::string::npos ||
            !std::getenv("USERPROFILE"));  // SEC-09
