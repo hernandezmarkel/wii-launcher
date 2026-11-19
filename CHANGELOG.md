@@ -13,6 +13,11 @@ solo una etiqueta `vX.Y.Z` aprobada publica algo.
 - Las actualizaciones van firmadas y se verifican antes de instalarse; si algo falla, vuelve sola la versión anterior.
 - Solo se actualiza el launcher: juegos, partidas, salas y ajustes no se tocan.
 
+## [1.0.0-beta.3] - 2026-11-19
+
+- Descarga más ligera: el paquete completo pasa de 401 a unos 285 MB y cada actualización de unos 9 a unos 6 MB.
+- El instalador de Mario Kart Wii ocupa 400 MB menos en disco: solo lleva el compilador para PCs de 64 bits.
+
 ## [1.0.0-beta.2] - 2026-11-18
 
 - Nueva descarga completa WiiPorts-<versión>.zip: trae los instaladores de Wii Party, Mario Party 9 y Mario Kart Wii (beta) y el servidor LAN de Mario Kart, para instalar desde tu WBFS sin bajar nada más.
