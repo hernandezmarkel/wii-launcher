@@ -33,6 +33,7 @@ struct ModMeta {               // lo que se sabe del origen (el usuario o el pro
     std::string id;            // «local.nombre» o «gamebanana.123456»; vacío = se deduce del archivo
     std::string name, version, provider = "local", source_id, source_page, license, author;
     std::string source_file_id, source_md5;   // archivo concreto del proveedor (para detectar actualizaciones)
+    int64_t source_added = 0;
 };
 
 struct InstalledMod {
@@ -42,6 +43,10 @@ struct InstalledMod {
     std::string name() const { return json["name"].str(); }
     std::string version() const { return json["version"].str(); }
     std::string content_sha() const { return json["content_sha256"].str(); }
+};
+
+struct InstallHashes {
+    std::string content_sha256, package_sha256;
 };
 
 struct ProfileEntry {
@@ -94,6 +99,7 @@ public:
     const Fst& fst() const { return fst_; }
     const GameModSupport& support() const { return *support_; }
     const fs::path& root() const { return root_; }
+    fs::path download_path() const;
 
     using Progress = std::function<void(const std::string& what, uint64_t done, uint64_t total)>;
     using Cancel = std::function<bool()>;
@@ -102,18 +108,21 @@ public:
     bool preview(const fs::path& source, PackagePlan& plan, std::string& error) const;
     // Instala en packages/ de forma transaccional. No toca ningún perfil.
     bool install(const fs::path& source, const ModMeta& meta, InstalledMod& out, std::string& error,
-                 const Progress& progress = {}, const Cancel& cancel = {});
+                 const Progress& progress = {}, const Cancel& cancel = {}, const InstallHashes& expected = {});
     std::vector<InstalledMod> installed() const;
     bool find_installed(const std::string& key, InstalledMod& out) const;
     // Borra un paquete que ningún perfil usa.
     bool uninstall(const std::string& key, std::string& error);
     // Comprueba que los archivos del paquete siguen intactos (hash).
     bool verify(const InstalledMod& mod, std::string& error) const;
+    bool verify_profile(const Profile& profile, const std::string& fingerprint, std::string& error) const;
 
     // Perfiles
     std::vector<std::string> profiles() const;
     bool load_profile(const std::string& name, Profile& out, std::string& error) const;
     bool save_profile(Profile profile, std::string& error);   // sube epoch
+    bool replace_profile_package(const std::string& name, const std::string& old_key,
+                                 const std::string& new_key, std::string& error);
     bool delete_profile(const std::string& name, std::string& error);
     std::string active_profile() const;
     bool set_active_profile(const std::string& name, std::string& error);

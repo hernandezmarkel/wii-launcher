@@ -1,32 +1,29 @@
-# Estado y bloqueos
+# Estado del gestor de mods
 
-Actualizado: 19/11/2026.
+Actualizado el 23/11/2026 sobre la beta.5 publicada. La [auditoría](07-auditoria-beta5.md)
+recoge el punto de partida y las [pruebas de esta rama](08-validacion-beta5.md) recogen los resultados.
 
-## Hecho
+| Juego | Estado actual |
+|---|---|
+| Wii Party | Sustitución de archivos y Riivolution de datos habilitados. Prueba A/B previa y descarga asistida verificada por loopback con GameBanana real. |
+| Mario Party 9 | Sustitución de archivos y Riivolution de datos habilitados tras la prueba real en SSQE01, revisión `5a2b71d`. |
+| Mario Kart Wii | El port WiiCompiled requiere un mecanismo de carga de mods. |
+| Super Smash Bros. Brawl | Port previsto. |
 
-- Fase 0: auditoría (`00-auditoria.md`).
-- Fases 1-3: núcleo `wl_mods` con pruebas (331/331), CLI `wlmods`, página «Mods» en el launcher (importar ZIP/carpeta
-  con revisión previa, arrastrar y soltar, perfiles, activar/desactivar, orden de carga, opciones de
-  Riivolution, desinstalar con confirmación). Lanzamiento offline y online con el perfil activo.
-- Fase 2: Wii Party verificado con prueba A/B real.
-- Fases 4-5: Explorar GameBanana (comprobación previa sin descargar, descarga con consentimiento) y Actualizaciones.
-- Fases 6-8: manifiesto de sala por canal aparte, comparación tipada, descargas de lo que falta, perfil de sesión,
-  unión automática opcional y vuelta al perfil habitual. Probado con dos launchers en este PC (`06-pruebas_resultados.md`).
-- Gate de sala: el fingerprint va en el token del HELLO, así que el anfitrión rechaza mods distintos.
+La pestaña Mods ofrece importación, perfiles, activación, orden, opciones de Riivolution,
+dependencias y desinstalación. Explorar consulta GameBanana. Actualizaciones conserva el
+paquete anterior y la configuración del perfil. El host y el invitado acuerdan la huella
+antes de entrar. La descarga asistida revalida los hashes y la sala, y activa un perfil
+temporal. El contrato de cuenta exporta referencias por juego y perfil, y permite calcular
+qué paquetes faltan en otro PC.
 
-## Bloqueos
+## Pendiente
 
-| Bloqueo | Afecta a | Qué hace falta |
-|---|---|---|
-| Solo hay un PC aquí | C22, C23 y toda prueba `REAL_2PCS` | Otro PC con Wii Party instalado y el mismo disco |
-| MP9 sin prueba A/B | mods de MP9 | Repetir `tools/prueba-ab-wiiparty.ps1` adaptado a MP9 (otro hilo trabaja su online: coordinar el turno) |
-| MKWii sin overlays en runtime | mods de MKWii | Perfil compilado de WiiCompiled o cambio en su runtime (hilo de MKWii) |
-| 7z/rar | importación directa | Biblioteca de extracción revisada (licencia y seguridad) o descomprimir a mano |
-| Lobby sin estado «pendiente» | entrar como no listo | Cambio en el protocolo de sala (dueño del netcode); de momento: comparar antes de unirse |
-| Sin permiso de descarga real | C23 y gate de la fase 4 | Markel pospuso la descarga de prueba de GameBanana |
-| main avanzó (beta.3) | fusión futura | Rebasar la rama antes de abrir el PR |
+- Una partida con dos equipos físicos y un mod que afecte al gameplay.
+- Una actualización entre dos versiones reales disponibles del mismo ZIP de GameBanana.
+  El escenario de actualización y recuperación se probó con un proveedor simulado.
+- Conectar el contrato de cuenta a Supabase cuando el proyecto tenga login.
+- Los formatos 7z y RAR se pueden importar descomprimidos como carpeta.
 
-## Datos de prueba que quedan en este PC
-
-En `%LOCALAPPDATA%\WiiLauncher\mods\wiiparty\` hay 4 paquetes de prueba (texto v1-v3 y textura). El perfil
-`default` está sin mods activos, así que el juego arranca como siempre. Se pueden desinstalar desde la página Mods.
+Las pruebas de esta rama utilizaron almacenes de mods en carpetas temporales. Los
+repositorios de los ports y los perfiles habituales quedan fuera de esta rama.

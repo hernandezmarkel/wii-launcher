@@ -23,7 +23,7 @@ const GameModSupport* game_support(const std::string& game_id) {
     // estático (engine/src/core/modules.cpp), así que cambiarlos no cambia el juego: se bloquean.
     // `proven` solo pasa a true tras la prueba A/B en el port real (docs/mods/06-pruebas_resultados.md).
     static const GameModSupport wiiparty{"wiiparty", "wl-vdisc-1", true, {"rel/"}, {".rel", ".rel.lz", ".dol"}};
-    static const GameModSupport mp9{"mp9", "wl-vdisc-1", false, {"modules/", "rel/"}, {".rel", ".rel.lz", ".dol"}};
+    static const GameModSupport mp9{"mp9", "wl-vdisc-1", true, {"modules/", "rel/"}, {".rel", ".rel.lz", ".dol"}};
     if (game_id == wiiparty.game_id) return &wiiparty;
     if (game_id == mp9.game_id) return &mp9;
     return nullptr;
@@ -35,6 +35,41 @@ std::string format_name(ModFormat f) {
         case ModFormat::Riivolution: return "riivolution";
         default: return "unknown";
     }
+}
+
+bool valid_mod_id(const std::string& id) {
+    return !id.empty() && id.size() <= 80 && id.find("..") == std::string::npos &&
+        std::all_of(id.begin(), id.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
+        });
+}
+
+Json serialize_dependencies(const std::vector<ModDependency>& dependencies) {
+    Json array = Json::array();
+    for (const auto& dependency : dependencies) {
+        Json item = Json::object();
+        item.set("id", dependency.id);
+        item.set("version", dependency.version);
+        array.push(std::move(item));
+    }
+    return array;
+}
+
+bool parse_dependencies(const Json& json, std::vector<ModDependency>& dependencies, std::string& error) {
+    dependencies.clear();
+    if (json.is_null()) return true;
+    if (!json.is_array() || json.size() > 32) { error = "lista de dependencias no válida"; return false; }
+    std::set<std::string> ids;
+    for (const auto& item : json.elements()) {
+        ModDependency dep{item["id"].str(), item["version"].str()};
+        if (!valid_mod_id(dep.id) || !ids.insert(dep.id).second || dep.version.empty() || dep.version.size() > 40 ||
+            std::any_of(dep.version.begin(), dep.version.end(), [](unsigned char c) { return c < 0x20; })) {
+            error = "dependencia de mod no válida";
+            return false;
+        }
+        dependencies.push_back(std::move(dep));
+    }
+    return true;
 }
 
 std::vector<std::string> PackagePlan::referenced_sources() const {
@@ -302,6 +337,10 @@ void riivo_patch(const XmlNode& patch, const std::string& sd_root, RiivoContext&
             }
             std::string src;
             if (!ext_path(op.attr("external"), src)) { ctx.plan->blocking.push_back("ruta externa no segura en «" + id + "»"); continue; }
+            if (fold_key(src) == "wii-launcher-mod.json") {
+                ctx.plan->blocking.push_back("el manifiesto del launcher no se puede usar como parche");
+                continue;
+            }
             auto se = ctx.by_key.find(fold_key(src));
             if (se == ctx.by_key.end()) { ctx.plan->ignored.push_back(src + ": lo pide el XML pero no está en el paquete"); continue; }
             std::string disc = op.attr("disc");
@@ -432,6 +471,17 @@ PackagePlan analyze_package(const PackageSource& source, const Fst& fst, const G
     std::vector<std::string> xmls;
     std::set<std::string> reasons;
     for (const auto& e : source.entries()) {
+        if (fold_key(e.name) == "wii-launcher-mod.json") {
+            std::string manifest, error;
+            Json json;
+            if (!source.read_small(e.name, manifest, 16 * 1024, error) || !parse_json(manifest, json, error) ||
+                !parse_dependencies(json["dependencies"], plan.dependencies, error)) {
+                reasons.insert(e.name + ": " + error);
+            } else if (json["schema"].num() != 1 || json["game_id"].str() != support.game_id) {
+                reasons.insert(e.name + ": esquema o juego incorrecto");
+            }
+            continue;
+        }
         switch (classify(e.name)) {
             case Kind::Payload: payload.push_back(e); break;
             case Kind::Doc: plan.ignored.push_back(e.name + ": documentación"); break;
@@ -476,7 +526,7 @@ QuickCheck quick_check(const std::vector<std::string>& names, const Fst& fst, co
     QuickCheck q;
     NameSource src;
     std::set<std::string> seen;
-    bool xml = false;
+    bool requires_preview = false;
     for (const auto& raw : names) {
         if (!raw.empty() && (raw.back() == '/' || raw.back() == '\\')) continue;
         std::string norm, why;
@@ -488,16 +538,16 @@ QuickCheck quick_check(const std::vector<std::string>& names, const Fst& fst, co
             return q;
         }
         if (!seen.insert(fold_key(norm)).second) continue;
-        xml |= classify(norm) == Kind::RiivoXml;
+        requires_preview |= classify(norm) == Kind::RiivoXml || fold_key(norm) == "wii-launcher-mod.json";
         src.list.push_back({norm, 0});
     }
     PackagePlan plan = analyze_package(src, fst, support, disc_id);
-    if (xml) {
-        // El XML hay que leerlo: solo cuentan los bloqueos que no vienen de no haberlo descargado.
+    if (requires_preview) {
+        // El XML y el manifiesto necesitan una lectura completa.
         for (const auto& b : plan.blocking)
             if (b.find("sin descargar") == std::string::npos) { q.verdict = QuickVerdict::Incompatible; q.reason = b; return q; }
         q.verdict = QuickVerdict::NeedsDownload;
-        q.reason = "Riivolution: se comprobará el XML al descargar";
+        q.reason = "se comprobarán los parches o dependencias al descargar";
         return q;
     }
     if (!plan.blocking.empty()) { q.verdict = QuickVerdict::Incompatible; q.reason = plan.blocking.front(); return q; }

@@ -280,6 +280,7 @@ int main(int argc, char** argv) {
         if (a.size() < 3) return fail("falta el id del mod");
         CatalogDetail d;
         if (!gb.detail(std::atoll(a[2].c_str()), d, error)) return fail(error);
+        if (!d.available_for(gid)) return fail("la ficha no está disponible para este juego");
         std::cout << d.item.name << " · " << d.item.author << " · licencia: " << d.license.substr(0, 120) << "\n";
         for (const auto& f : d.files) {
             std::vector<std::string> tree;
@@ -292,17 +293,10 @@ int main(int argc, char** argv) {
                       << (q.files ? " (" + std::to_string(q.files) + " archivos)" : "") << "\n";
             if (cmd == "gb-install" && opt.count("file") && std::to_string(f.id) == opt["file"]) {
                 if (q.verdict == QuickVerdict::Incompatible) return fail("incompatible: " + q.reason);
-                fs::path dl = store.root() / "staging" / ("descarga-" + std::to_string(f.id) + ".zip");
+                if (!f.supported_archive()) return fail("se necesita un ZIP compatible de hasta 512 MiB");
+                fs::path dl = store.download_path();
                 if (!gb.download(f, dl, error)) return fail(error);
-                ModMeta meta;
-                meta.id = "gamebanana." + std::to_string(d.item.id);
-                meta.name = d.item.name;
-                meta.version = f.version.empty() ? d.item.version : f.version;
-                meta.provider = "gamebanana";
-                meta.source_id = std::to_string(d.item.id);
-                meta.source_page = d.item.profile_url;
-                meta.license = d.license.substr(0, 300);
-                meta.author = d.item.author;
+                ModMeta meta = catalog_meta("gamebanana", d, f);
                 InstalledMod mod;
                 bool ok = store.install(dl, meta, mod, error);
                 std::error_code ec;

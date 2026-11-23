@@ -56,7 +56,26 @@ Nota honesta: un primer intento con un mod de texto (`mess.bin`) cargó el archi
 disco virtual (comprobado en el log), pero las frases cambiadas no aparecen en las pantallas visitadas
 (los rótulos del menú son texturas). No se usó como evidencia.
 
-Mario Party 9: mismo motor, **no declarado** hasta repetir esta prueba con su port (`proven = false`).
+## Prueba A/B real en Mario Party 9 (`REAL_1PC`, 23/11/2026)
+
+Port instalado `5a2b71d` (SSQE01). Se lanzó con `wlmods`, ejecutable y NAND de prueba y
+acceso de lectura al disco extraído. El ZIP local reemplazó la textura `9stars_title.tpl`
+dentro de `locale_us/sp/menu/layout/title.arc.lz`. Se conservó su alfa y se cambió el color
+del logotipo a verde. El tamaño del recurso pasó de 94 944 a 450 796 bytes.
+
+| Ejecución | Resultado |
+|---|---|
+| Perfil sin mods | Logotipo original. El port leyó 94 944 bytes de `games/mp9/extracted/files/…`. |
+| Perfil activo, huella `a4174ab64d11c1ff…` | Logotipo verde. El port leyó 450 796 bytes de `vdisc/a4174ab64d11c1ff/files/…` y siguió en la pantalla de título. |
+| Siguiente proceso tras desactivar | Huella `vanilla`, lectura de 94 944 bytes del original y vuelta al logotipo original. |
+
+El SHA-256 del recurso original coincidió antes y después de la prueba. Las tres capturas
+del fotograma 8 y los registros `a.log`, `b.log` y `c.log` quedaron en la carpeta temporal
+`%TEMP%/wl-mods-ab-a3265162`. No se distribuyen el ZIP ni las capturas.
+
+También se empaquetó el mismo recurso con un XML de Riivolution de solo archivos y una
+opción activa por defecto. Con el soporte habilitado se repitió el lanzamiento normal
+sin `WL_MODS_EXPERIMENTAL`. El port volvió a leer los 450 796 bytes del disco virtual.
 
 ## Sala simulada en un PC (`SIMULATED_NETWORK`, 19/11/2026)
 

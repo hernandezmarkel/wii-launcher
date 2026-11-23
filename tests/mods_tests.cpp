@@ -3,15 +3,21 @@
 // Todo en carpetas temporales: nunca toca el disco extraído, la ROM ni los guardados reales.
 #include <zlib.h>
 
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <set>
+#include <thread>
+
+#include "mods_service.h"
 
 #include "wl/mods/fst.h"
 #include "wl/mods/gamebanana.h"
+#include "wl/mods/profile_catalog.h"
 #include "wl/mods/json.h"
 #include "wl/mods/lobby_mods.h"
 #include "wl/mods/package.h"
@@ -375,6 +381,51 @@ void test_store(const fs::path& tmp) {
     MCHECK(store.install(tmp / "b.zip", mb, b, e));
     MCHECK(store.installed().size() == 2);
     MCHECK(store.verify(a, e));
+    // Actualiza la referencia del perfil sin moverla ni activar una entrada desactivada.
+    {
+        ModMeta ma_next = ma;
+        ma_next.version = "2.0.0";
+        InstalledMod next;
+        MCHECK(store.install(tmp / "a.zip", ma_next, next, e));
+        Profile upgrade;
+        upgrade.name = "upgrade";
+        upgrade.mods = {{b.id(), b.key, true, {}}, {a.id(), a.key, false, {}}};
+        MCHECK(store.save_profile(upgrade, e) && store.set_active_profile(upgrade.name, e));
+        MCHECK(!store.replace_profile_package(upgrade.name, a.key, b.key, e));
+        MCHECK(store.load_profile(upgrade.name, upgrade, e) && upgrade.mods[1].package == a.key);
+        MCHECK(store.replace_profile_package(upgrade.name, a.key, next.key, e));
+        ModStore reopened("wiiparty", tmp / "datos", disc);
+        MCHECK(reopened.open(e) && reopened.load_profile(upgrade.name, upgrade, e) && upgrade.epoch == 2);
+        MCHECK(upgrade.mods[0].package == b.key && upgrade.mods[1].package == next.key && !upgrade.mods[1].enabled);
+        MCHECK(reopened.verify(a, e) && reopened.verify(next, e));
+        MCHECK(!reopened.replace_profile_package(upgrade.name, a.key, next.key, e));
+        MCHECK(reopened.replace_profile_package(upgrade.name, next.key, a.key, e));
+        MCHECK(reopened.set_active_profile("default", e) && reopened.delete_profile(upgrade.name, e) && reopened.uninstall(next.key, e));
+    }
+    {
+        const std::string xml = R"(<wiidisc><options><section name="Pack"><option name="Texto" default="1">
+            <choice name="Base"><patch id="base"/></choice><choice name="Alternativa"><patch id="alt"/></choice>
+            </option></section></options><patch id="base"><file disc="/opening.bnr" external="/a.bnr"/></patch>
+            <patch id="alt"><file disc="/opening.bnr" external="/b.bnr"/></patch></wiidisc>)";
+        std::string changed = xml;
+        changed.replace(changed.find("default=\"1\""), 11, "default=\"2\"");
+        write_zip(tmp / "options1.zip", {{"riivolution/r.xml", xml}, {"a.bnr", "A"}, {"b.bnr", "B"}});
+        write_zip(tmp / "options2.zip", {{"riivolution/r.xml", changed}, {"a.bnr", "A"}, {"b.bnr", "B"}});
+        ModMeta options;
+        options.name = "Preferencias";
+        options.version = "1.0";
+        InstalledMod v1, v2;
+        MCHECK(store.install(tmp / "options1.zip", options, v1, e));
+        options.version = "2.0";
+        MCHECK(store.install(tmp / "options2.zip", options, v2, e));
+        Profile p;
+        p.name = "implicit";
+        p.mods = {{v1.id(), v1.key, true, {}}};
+        MCHECK(store.save_profile(p, e) && store.set_active_profile(p.name, e) &&
+               store.replace_profile_package(p.name, v1.key, v2.key, e));
+        MCHECK(store.load_profile(p.name, p, e) && p.mods.size() == 1 && p.mods[0].choices["Pack/Texto"] == 1);
+        MCHECK(store.delete_profile(p.name, e) && store.uninstall(v1.key, e) && store.uninstall(v2.key, e));
+    }
     // Cancelación a mitad: no queda nada a medias (B14/D10)
     ModMeta mc;
     mc.name = "Mod C";
@@ -385,6 +436,27 @@ void test_store(const fs::path& tmp) {
     // Paquete rechazado: no se instala
     write_zip(tmp / "mal.zip", {{"files/opening.bnr", "B"}, {"x.exe", "MZ"}});
     MCHECK(!store.install(tmp / "mal.zip", mc, c, e));
+    {
+        // El manifiesto de datos condiciona la carga y viaja en la referencia de sala.
+        write_zip(tmp / "requires.zip", {{"files/opening.bnr", "C"},
+            {"wii-launcher-mod.json", R"({"schema":1,"game_id":"wiiparty","dependencies":[{"id":"local.mod-a","version":"1.0.0"}]})"}});
+        PackagePlan dependency_plan;
+        MCHECK(store.preview(tmp / "requires.zip", dependency_plan, e) && dependency_plan.ok() && dependency_plan.dependencies.size() == 1);
+        MCHECK(store.install(tmp / "requires.zip", mc, c, e) && store.verify(c, e));
+        Profile needs_base;
+        needs_base.mods = {{c.id(), c.key, true, {}}, {a.id(), a.key, false, {}}};
+        MCHECK(!store.compute(needs_base).problems.empty());
+        needs_base.mods[1].enabled = true;
+        const auto needed = store.compute(needs_base);
+        MCHECK(needed.problems.empty() && store.verify_profile(needs_base, needed.fingerprint, e));
+        SessionManifest parsed;
+        const auto manifest = build_session_manifest(store, needs_base, "test", 1, "123abc");
+        MCHECK(parse_session_manifest(manifest.dump(), parsed, e) && parsed.mods.size() == 2 &&
+               parsed.mods[0].dependencies.size() == 1 && parsed.mods[0].dependencies[0].id == a.id());
+        MCHECK(!diff_session(store, needs_base, parsed, "456def").game_ok);
+        MCHECK(diff_session(store, needs_base, parsed, "123abc").compatible);
+        MCHECK(store.uninstall(c.key, e));
+    }
 
     // Perfiles: default vacío = vanilla
     Profile def;
@@ -436,8 +508,13 @@ void test_store(const fs::path& tmp) {
     fs::path a_file = tmp / "datos" / "packages" / a.key / "content" / "A" / "files" / "locale" / "sp_EU" / "mess.bin";
     put(a_file, "ALTERADO");
     MCHECK(!store.verify(a, e));
+    MCHECK(!store.verify_profile(only_a, ea.fingerprint, e));
     fs::path vd3;
     MCHECK(!store.build_vdisc(store.compute(only_a), vd3, e));
+    InstalledMod repaired, reused;
+    MCHECK(store.install(tmp / "a.zip", ma, repaired, e) && repaired.key != a.key && store.verify(repaired, e));
+    MCHECK(store.install(tmp / "a.zip", ma, reused, e) && reused.key == repaired.key);
+    MCHECK(store.uninstall(repaired.key, e));
 
     // Desinstalar: bloqueado si un perfil lo usa
     MCHECK(!store.uninstall(b.key, e));
@@ -485,8 +562,11 @@ struct MockHttp : wl::upd::HttpClient {
 void test_gamebanana(const fs::path& tmp) {
     MCHECK(gamebanana_url_allowed("https://gamebanana.com/dl/1"));
     MCHECK(gamebanana_url_allowed("https://files.gamebanana.com/mods/x.zip"));
+    MCHECK(gamebanana_url_allowed("https://filecache52.gamebanana.com/mods/x.zip"));
     for (const char* bad : {"http://gamebanana.com/dl/1", "https://gamebanana.com.evil.com/x", "https://evil.com/x", "file:///c:/x",
-                            "https://user@gamebanana.com/x", "https://gamebanana.com:8443/x", "https://192.168.1.10/x"})
+                            "https://user@gamebanana.com/x", "https://gamebanana.com:8443/x", "https://gamebanana.com:443extra/x",
+                            "https://filecache52.gamebanana.com.example.com/x", "https://filecacheabc.gamebanana.com/x",
+                            "https://192.168.1.10/x"})
         MCHECK(!gamebanana_url_allowed(bad));
     MCHECK(gamebanana_game("wiiparty") == 6370 && gamebanana_game("brawl") == 5678 && gamebanana_game("x") == 0);
     MCHECK(strip_html("<b>Hola</b> &amp; <a href='x'>adiós</a>") == "Hola & adiós");
@@ -522,14 +602,46 @@ void test_gamebanana(const fs::path& tmp) {
     CatalogDetail d;
     MCHECK(!gb.detail(9, d, e));
     // Ficha: archivos sin MD5 válido o con URL ajena se descartan
-    http.ok("https://gamebanana.com/apiv11/Mod/7/ProfilePage", R"({"_idRow":7,"_sName":"Mod 7","_sLicense":"<b>CC BY</b>","_aFiles":[
+    http.ok("https://gamebanana.com/apiv11/Mod/7/ProfilePage", R"({"_idRow":7,"_aGame":{"_idRow":6370},"_sName":"Mod 7","_sLicense":"<b>CC BY</b>","_aFiles":[
         {"_idRow":70,"_sFile":"bueno.zip","_nFilesize":4,"_sMd5Checksum":"5D41402ABC4B2A76B9719D911017C592","_sDownloadUrl":"https://gamebanana.com/dl/70"},
         {"_idRow":71,"_sFile":"malo.zip","_nFilesize":4,"_sMd5Checksum":"5d41402abc4b2a76b9719d911017c592","_sDownloadUrl":"https://evil.example/dl/71"},
         {"_idRow":72,"_sFile":"sinmd5.zip","_nFilesize":4,"_sDownloadUrl":"https://gamebanana.com/dl/72"}]})");
     MCHECK(gb.detail(7, d, e) && d.files.size() == 1 && d.license == "CC BY" && d.files[0].md5 == "5d41402abc4b2a76b9719d911017c592");
+    MCHECK(d.available_for(6370) && !d.available_for(6248));
+    CatalogDetail variants = d;
+    variants.files[0].version = "1.0";
+    variants.files.push_back(variants.files[0]);
+    variants.files.back().id = 99;
+    variants.files.back().version = "2.0";
+    variants.files.back().added = 200;
+    SessionMod wanted;
+    wanted.source_id = "7";
+    wanted.version = "1.0";
+    MCHECK(resolve_catalog_file(variants, wanted) == &variants.files[0]);
+    wanted.source_file_id = "70";
+    wanted.source_md5 = variants.files[0].md5;
+    MCHECK(resolve_catalog_file(variants, wanted) == &variants.files[0]);
+    variants.files[0].md5 = std::string(32, 'a');
+    MCHECK(!resolve_catalog_file(variants, wanted));
+    wanted.source_file_id.clear();
+    variants.files.back().version = "1.0";
+    MCHECK(!resolve_catalog_file(variants, wanted));
+    InstalledMod original;
+    original.json = Json::object();
+    original.json.set("source_id", "7");
+    original.json.set("source_file_id", "70");
+    original.json.set("source_md5", d.files[0].md5);
+    original.json.set("source_added", 100);
+    MCHECK(is_catalog_update(variants, variants.files[0], original));   // mismo archivo, otros bytes
+    MCHECK(!is_catalog_update(variants, variants.files[1], original)); // bytes ya instalados
+    variants.files[1].md5 = std::string(32, 'b');
+    MCHECK(is_catalog_update(variants, variants.files[1], original));
+    variants.files[1].name = "incompatible.7z";
+    MCHECK(!is_catalog_update(variants, variants.files[1], original));
     // Descarga: redirección a files.gamebanana.com permitida; MD5 de "hello" correcto
     http.redirect("https://gamebanana.com/dl/70", "https://files.gamebanana.com/mods/bueno.zip");
-    http.ok("https://files.gamebanana.com/mods/bueno.zip", "hello");
+    http.redirect("https://files.gamebanana.com/mods/bueno.zip", "https://filecache52.gamebanana.com/mods/bueno.zip");
+    http.ok("https://filecache52.gamebanana.com/mods/bueno.zip", "hello");
     CatalogFile f = d.files[0];
     f.size = 5;
     MCHECK(gb.download(f, tmp / "dl" / "a.zip", e) && get(tmp / "dl" / "a.zip") == "hello");
@@ -581,6 +693,7 @@ void test_session(const fs::path& tmp) {
     write_zip(tmp / "sx.zip", {{"files/locale/sp_EU/mess.bin", "X"}});
     ModMeta a, b, x;
     a.id = "gamebanana.111"; a.name = "A"; a.version = "1.0"; a.provider = "gamebanana"; a.source_id = "111";
+    a.source_file_id = "456"; a.source_md5 = std::string(32, 'a');
     b.id = "local.b"; b.name = "B"; b.version = "1.0";
     x.id = "local.x"; x.name = "X"; x.version = "1.0";
     InstalledMod ha, hb, ga, gb, gb2, gx;
@@ -591,6 +704,13 @@ void test_session(const fs::path& tmp) {
     SessionManifest m;
     MCHECK(parse_session_manifest(mj.dump(), m, e));
     MCHECK(m.mods.size() == 2 && m.fingerprint == host.compute(hp).fingerprint && m.revision == 3);
+    MCHECK(m.mods[0].source_file_id == "456" && m.mods[0].source_md5 == a.source_md5 &&
+           m.mods[0].package_sha256 == ha.json["package_sha256"].str());
+    InstalledMod rejected;
+    MCHECK(!guest.install(tmp / "sa.zip", a, rejected, e, {}, {}, {m.mods[1].content_sha256, {}}));
+    MCHECK(guest.installed().empty());
+    MCHECK(!host.install(tmp / "sa.zip", a, rejected, e, {}, {}, {{}, std::string(64, 'a')}));
+    MCHECK(host.find_installed(ha.key, rejected) && host.verify(rejected, e));
 
     // C04/C05: al invitado le falta todo; A se puede pedir a GameBanana, B (importado a mano) no.
     Profile gp;
@@ -599,8 +719,25 @@ void test_session(const fs::path& tmp) {
     MCHECK(d.items[0].state == ModDiff::Missing && d.items[0].downloadable);
     MCHECK(d.items[1].state == ModDiff::NoAuthorizedSource && !d.items[1].downloadable);
     MCHECK(!d.session_ready);
+    // Cuenta: los metadatos conservan un mod desactivado y otro paquete instalado fuera del perfil.
+    Profile account = hp;
+    account.mods.erase(account.mods.begin() + 1);
+    account.mods[0].enabled = false;
+    MCHECK(host.save_profile(account, e));
+    Json catalog_json;
+    MCHECK(export_profile_catalog(host, "default", catalog_json, e));
+    MCHECK(!export_profile_catalog(host, "session", catalog_json, e));
+    ProfileCatalog account_catalog;
+    MCHECK(parse_profile_catalog(catalog_json.dump(), account_catalog, e));
+    MCHECK(account_catalog.mods.size() == 2 && catalog_json.dump().find(ha.key) == std::string::npos);
+    CatalogRestore pending;
+    MCHECK(plan_catalog_restore(guest, account_catalog, pending, e) && !pending.complete &&
+           pending.downloads.size() == 1 && pending.manual.size() == 1);
     // Con los dos instalados pero desactivados (C08) y uno extra activo (C07): el perfil de sesión lo arregla.
     MCHECK(guest.install(tmp / "sa.zip", a, ga, e) && guest.install(tmp / "sb.zip", b, gb, e) && guest.install(tmp / "sx.zip", x, gx, e));
+    MCHECK(plan_catalog_restore(guest, account_catalog, pending, e) && pending.complete &&
+           pending.profile.mods.size() == 1 && pending.profile.mods[0].package == ga.key &&
+           !pending.profile.mods[0].enabled);
     gp.mods = {{gx.id(), gx.key, true, {}}, {ga.id(), ga.key, false, {}}, {gb.id(), gb.key, false, {}}};
     d = diff_session(guest, gp, m);
     MCHECK(!d.compatible && d.disabled == 2 && d.extra == 1 && d.session_ready);
@@ -638,6 +775,14 @@ void test_session(const fs::path& tmp) {
     g2p.mods = {{g2a.id(), g2a.key, true, {}}, {g2b.id(), g2b.key, true, {}}};
     d = diff_session(guest2, g2p, m);
     MCHECK(!d.compatible && d.items[1].state == ModDiff::WrongHash && !d.session_ready);
+    ModMeta other_version = b;
+    other_version.version = "2.0";
+    InstalledMod same_bytes;
+    MCHECK(guest2.install(tmp / "sb.zip", other_version, same_bytes, e));
+    SessionManifest expected_version = m;
+    expected_version.mods[1].version = "3.0";
+    d = diff_session(guest2, g2p, expected_version);
+    MCHECK(d.items[1].state == ModDiff::WrongVersion && !d.session_ready);
     // C02: otro disco base
     SessionManifest other = m;
     other.base_content_id = "SUPE01:0000000000000000";
@@ -665,6 +810,7 @@ void test_session(const fs::path& tmp) {
     MCHECK(!hostile("id", Json("A.Mayus")));
     MCHECK(!hostile("effective_content_sha256", Json("no-es-hex")));
     MCHECK(!hostile("load_order", Json(-1)));
+    MCHECK(!hostile("load_order", Json(int64_t(4294967296))));
     {
         // Una URL o ruta en el manifiesto no se usa para nada: source desconocido → no descargable.
         Json bad = mj;
@@ -703,6 +849,86 @@ void test_session(const fs::path& tmp) {
     MCHECK(!fetch_manifest("127.0.0.1", port, got, e, 800));
 }
 
+void test_mods_service_update(const fs::path& tmp) {
+    auto data = tmp / "service-data";
+    const auto* value = std::getenv("WL_LOCALAPPDATA");
+    const std::string saved = value ? value : "";
+    _putenv_s("WL_LOCALAPPDATA", data.u8string().c_str());
+    const auto game = tmp / "service-wiiparty";
+    auto disc = game / "games" / "wiiparty" / "extracted";
+    make_disc(disc, kDisc);
+    write_zip(tmp / "old.zip", {{"files/opening.bnr", "versión original"}});
+    write_zip(tmp / "new.zip", {{"files/opening.bnr", "versión nueva"}});
+    const auto original_md5 = md5_file_hex(tmp / "old.zip");
+    const auto new_md5 = md5_file_hex(tmp / "new.zip");
+    const auto zip = get(tmp / "new.zip");
+    ModStore store("wiiparty", default_mods_root("wiiparty"), disc);
+    ModMeta meta;
+    meta.id = "gamebanana.7";
+    meta.name = "Actualizable";
+    meta.version = "1.0.0";
+    meta.provider = "gamebanana";
+    meta.source_id = "7";
+    meta.source_file_id = "70";
+    meta.source_md5 = original_md5;
+    meta.source_added = 10;
+    InstalledMod prior;
+    std::string error;
+    MCHECK(store.open(error) && store.install(tmp / "old.zip", meta, prior, error));
+    Profile profile;
+    profile.mods = {{prior.id(), prior.key, false, {}}};
+    MCHECK(store.save_profile(profile, error));
+
+    auto http = std::make_unique<MockHttp>();
+    MockHttp& mock = *http;
+    const auto download = "https://gamebanana.com/dl/71";
+    mock.ok("https://gamebanana.com/apiv11/Mod/7/ProfilePage",
+        "{\"_idRow\":7,\"_aGame\":{\"_idRow\":6370},\"_sName\":\"Actualizable\",\"_aFiles\":["
+        "{\"_idRow\":71,\"_sFile\":\"new.zip\",\"_nFilesize\":" + std::to_string(zip.size()) +
+        ",\"_sMd5Checksum\":\"" + new_md5 + "\",\"_tsDateAdded\":20,\"_sVersion\":\"2.0.0\","
+        "\"_sDownloadUrl\":\"https://gamebanana.com/dl/71\"}]}");
+    mock.ok("https://api.gamebanana.com/Core/Item/Data?itemtype=File&itemid=71&fields=Metadata().aArchiveFilesList()",
+        R"([["files/opening.bnr"]])");
+    mock.routes[download].status = 404;
+    {
+        wl::ModsService service({}, std::move(http));
+        auto idle = [&] {
+            auto until = std::chrono::steady_clock::now() + std::chrono::seconds(7);
+            auto snapshot = service.snapshot();
+            while (snapshot.busy && std::chrono::steady_clock::now() < until) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                snapshot = service.snapshot();
+            }
+            return snapshot;
+        };
+        service.open("wiiparty", "Wii Party", game);
+        MCHECK(idle().ready);
+        service.check_updates();
+        auto snapshot = idle();
+        MCHECK(snapshot.updates.size() == 1 && snapshot.updates[0].available);
+        service.open_detail(7, prior.key);
+        MCHECK(idle().has_detail);
+        service.download_file(7, 71);
+        snapshot = idle();
+        MCHECK(!snapshot.has_preview && !snapshot.error.empty() && snapshot.installed.size() == 1);
+        MCHECK(store.load_profile("default", profile, error) && profile.mods.size() == 1 &&
+               profile.mods[0].package == prior.key && !profile.mods[0].enabled);
+
+        mock.ok(download, zip);
+        service.clear_messages();
+        service.download_file(7, 71);
+        snapshot = idle();
+        MCHECK(snapshot.has_preview && snapshot.preview.ok() && snapshot.preview_profile == "default");
+        service.install_preview("", "", false);
+        snapshot = idle();
+        MCHECK(snapshot.error.empty() && snapshot.installed.size() == 2);
+        MCHECK(store.load_profile("default", profile, error) && profile.mods.size() == 1 &&
+               profile.mods[0].package != prior.key && !profile.mods[0].enabled);
+        MCHECK(store.verify(prior, error));
+    }
+    _putenv_s("WL_LOCALAPPDATA", saved.c_str());
+}
+
 }  // namespace
 
 void run_mods_tests() {
@@ -719,5 +945,6 @@ void run_mods_tests() {
     test_store(tmp);
     test_gamebanana(tmp);
     test_session(tmp);
+    test_mods_service_update(tmp);
     if (failures == before) fs::remove_all(tmp, ec);
 }

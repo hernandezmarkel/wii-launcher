@@ -3,7 +3,7 @@
 | Juego | Estado | Formatos | Cómo se aplica | Evidencia |
 |---|---|---|---|---|
 | Wii Party (SUPP01/SUPE01) | **Compatible (verificado)** | archivos del disco; Riivolution `<file>/<folder>` | disco virtual por `argv[1]` | A/B real 18/11/2026 (`06-pruebas_resultados.md`) |
-| Mario Party 9 (SSQE01) | Pendiente de prueba A/B | mismos (motor igual) | igual | — (`proven = false`: la UI no lo ofrece) |
+| Mario Party 9 (SSQE01) | **Compatible (verificado)** | archivos del disco; Riivolution `<file>/<folder>` | disco virtual por `argv[1]` | A/B real 23/11/2026 (`06-pruebas_resultados.md`) |
 | Mario Kart Wii (WiiCompiled) | No soportado en el launcher | — | requiere perfil compilado o cambio en su runtime | auditoría §4 |
 | Brawl | No existe el port | — | — | — |
 

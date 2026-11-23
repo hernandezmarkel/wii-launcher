@@ -45,6 +45,8 @@ std::string url_encode(const std::string& s) {
 }
 
 bool host_of(const std::string& url, std::string& scheme, std::string& host, int& port) {
+    if (std::any_of(url.begin(), url.end(), [](unsigned char c) { return c <= 0x20 || c == 0x7f || c == '\\'; }))
+        return false;
     size_t s = url.find("://");
     if (s == std::string::npos) return false;
     scheme = url.substr(0, s);
@@ -55,7 +57,9 @@ bool host_of(const std::string& url, std::string& scheme, std::string& host, int
     size_t colon = authority.rfind(':');
     port = scheme == "https" ? 443 : 80;
     if (colon != std::string::npos) {
-        port = std::atoi(authority.substr(colon + 1).c_str());
+        std::string value = authority.substr(colon + 1);
+        if (value != "443") return false;
+        port = 443;
         authority = authority.substr(0, colon);
     }
     host = authority;
@@ -68,6 +72,7 @@ std::string cache_name(const std::string& url) { return upd::sha256_hex(url).sub
 CatalogItem item_from(const Json& r) {
     CatalogItem it;
     it.id = r["_idRow"].num();
+    it.game = r["_aGame"]["_idRow"].num();
     it.name = r["_sName"].str().substr(0, 200);
     it.category = r["_aRootCategory"]["_sName"].str().substr(0, 80);
     it.author = r["_aSubmitter"]["_sName"].str().substr(0, 80);
@@ -86,7 +91,12 @@ bool gamebanana_url_allowed(const std::string& url) {
     int port = 0;
     if (!host_of(url, scheme, host, port)) return false;
     if (scheme != "https" || port != 443) return false;
-    return host == "gamebanana.com" || host == "api.gamebanana.com" || host == "files.gamebanana.com";
+    if (host == "gamebanana.com" || host == "api.gamebanana.com" || host == "files.gamebanana.com") return true;
+    constexpr size_t prefix = sizeof("filecache") - 1;
+    size_t dot = host.find('.');
+    return host.compare(0, prefix, "filecache") == 0 && dot > prefix && dot <= prefix + 3 &&
+        host.compare(dot, std::string::npos, ".gamebanana.com") == 0 &&
+        std::all_of(host.begin() + prefix, host.begin() + dot, [](char c) { return c >= '0' && c <= '9'; });
 }
 
 int64_t gamebanana_game(const std::string& game_id) {

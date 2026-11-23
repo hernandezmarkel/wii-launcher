@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "wl/mods/json.h"
+#include "wl/mods/reference.h"
 #include "wl/mods/store.h"
 
 namespace wl::mods {
@@ -18,24 +19,20 @@ constexpr int kSessionProtocolVersion = 1;
 constexpr size_t kMaxSessionManifest = 64 * 1024;
 constexpr size_t kMaxSessionMods = 200;
 
-struct SessionMod {
-    std::string id, name, version, source, source_id;
-    std::string content_sha256, config_sha256;
-    int load_order = 0;
-    std::map<std::string, int> choices;
-};
+using SessionMod = ModReference;
 
 struct SessionManifest {
     int protocol_version = 0;
     std::string lobby_id;
     uint64_t revision = 0;
-    std::string game_id, base_content_id, loader;
+    std::string game_id, game_revision, base_content_id, loader;
     std::string fingerprint;   // «vanilla» o sha256
     std::vector<SessionMod> mods;
 };
 
 // Manifiesto del perfil `profile` de este PC (anfitrión).
-Json build_session_manifest(const ModStore& store, const Profile& profile, const std::string& lobby_id, uint64_t revision);
+Json build_session_manifest(const ModStore& store, const Profile& profile, const std::string& lobby_id,
+                            uint64_t revision, const std::string& game_revision = {});
 // Validación estricta de un manifiesto recibido (D07): tamaño, tipos, formatos de id/hash, número de mods.
 bool parse_session_manifest(const std::string& text, SessionManifest& out, std::string& error);
 
@@ -64,6 +61,7 @@ struct SessionDiff {
     Profile session_profile;
 };
 
-SessionDiff diff_session(const ModStore& store, const Profile& local, const SessionManifest& host);
+SessionDiff diff_session(const ModStore& store, const Profile& local, const SessionManifest& host,
+                         const std::string& game_revision = {});
 
 }  // namespace wl::mods

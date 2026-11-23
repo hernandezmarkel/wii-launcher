@@ -239,8 +239,9 @@ struct App {
     std::unique_ptr<mods::ManifestServer> manifest_server;   // anfitrión: publica sus mods junto a la sala
     bool auto_join = false;         // «unirme automáticamente cuando esté listo» (casilla)
     bool auto_join_armed = false;   // el usuario pidió preparar los mods con esa casilla marcada
-    bool auto_session_tried = false;
     bool sync_consent = false;      // lista de descargas de la sala a la vista, esperando «Sí»
+    bool join_preflight = false;
+    bool ready_pending = false;
     std::string room_fingerprint;    // conjunto de mods con el que se entró en la sala (se revalida al empezar)
 };
 
@@ -509,6 +510,7 @@ void info_row(const char* label, const std::string& value, ImU32 color) {
 }
 
 void open_room(App& app, bool host);
+void leave_room(App& app);
 void open_mods(App& app);
 
 // "Instalar o actualizar" abre el launcher original del juego, que es quien compila desde el disco.
@@ -1056,6 +1058,10 @@ void mods_preview_card(App& app, const ModsSnapshot& m, float width) {
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 13, P.warn, w.c_str(), width - px(44));
     }
+    for (const auto& dependency : plan.dependencies) {
+        ImGui::SetCursorPosX(px(22));
+        text(g_regular, 13, P.dim, ("Requiere " + dependency.id + " " + dependency.version).c_str(), width - px(44));
+    }
     if (plan.ok()) {
         size_t n = 0;
         for (const auto& [id, ops] : plan.patches) n += ops.size();
@@ -1082,7 +1088,13 @@ void mods_preview_card(App& app, const ModsSnapshot& m, float width) {
             ImGui::SetTooltip("%s", all.c_str());
         }
     }
-    if (plan.ok()) {
+    if (plan.ok() && !m.preview_update.empty()) {
+        ImGui::SetCursorPosX(px(22));
+        const std::string update = m.preview_profile.empty()
+            ? "La nueva versión se añadirá a Instalados."
+            : "Se actualizará el perfil «" + m.preview_profile + "» conservando el orden, la activación y las opciones compatibles.";
+        text(g_regular, 13, P.dim, (update + " La versión anterior seguirá disponible.").c_str(), width - px(44));
+    } else if (plan.ok()) {
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 13, P.faint, "Nombre y versión (como los llama el autor)");
         ImGui::SetCursorPosX(px(22));
@@ -1095,8 +1107,9 @@ void mods_preview_card(App& app, const ModsSnapshot& m, float width) {
         ImGui::Checkbox("Activarlo en el perfil actual", &app.mod_activate);
     }
     ImGui::SetCursorPosX(px(22));
-    if (button("Instalar", Btn::Primary, plan.ok() && !m.busy, px(140), "Este paquete no se puede instalar.")) {
-        app.mods->install_preview(app.mod_name, app.mod_version, app.mod_activate);
+    if (button(m.preview_update.empty() ? "Instalar" : "Actualizar", Btn::Primary, plan.ok() && !m.busy, px(140), "Este paquete no se puede instalar.")) {
+        if (m.preview_update.empty()) app.mods->install_preview(app.mod_name, app.mod_version, app.mod_activate);
+        else app.mods->install_preview("", "", false);
         app.mod_name[0] = app.mod_version[0] = 0;
     }
     ImGui::SameLine();
@@ -1120,6 +1133,10 @@ void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
         return;
     }
     if (!m.catalog_loaded && app.gb_requested != app.mods_game) { app.mods->browse(1, ""); app.gb_requested = app.mods_game; }
+    auto installed = [&](int64_t id) {
+        const std::string key = "gamebanana." + std::to_string(id);
+        return std::any_of(m.installed.begin(), m.installed.end(), [&](const mods::InstalledMod& mod) { return mod.id() == key; });
+    };
     if (m.has_detail) {
         const mods::CatalogDetail& d = m.detail;
         ImGui::SetCursorPosX(x0);
@@ -1127,7 +1144,9 @@ void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
         ImGui::SetCursorPos(ImVec2(px(22), px(18)));
         text(g_semibold, 17, P.text, d.item.name.c_str(), width - px(44));
         ImGui::SetCursorPosX(px(22));
-        text(g_regular, 13, P.dim, ("de " + d.item.author + " · " + d.item.category + (d.item.version.empty() ? "" : " · versión " + d.item.version)).c_str(), width - px(44));
+        text(g_regular, 13, P.dim, ("de " + d.item.author + " · " + d.item.category +
+            (d.item.version.empty() ? "" : " · versión " + d.item.version) +
+            (installed(d.item.id) ? " · Instalado" : "")).c_str(), width - px(44));
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 12.5f, P.faint, ("Licencia: " + (d.license.empty() ? std::string("no indicada") : d.license)).c_str(), width - px(44));
         if (!d.description.empty()) {
@@ -1143,7 +1162,9 @@ void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
             ImU32 vc = P.warn;
             const char* vt = i < m.checks.size() ? verdict_text(m.checks[i], vc) : "—";
             ImGui::SetCursorPosX(px(22));
-            text(g_semibold, 13.5f, P.text, (f.name + "  ·  " + human_size(f.size) + "  ·  antivirus de GameBanana: " + (f.av_result.empty() ? "?" : f.av_result)).c_str(), width - px(44));
+            const std::string version = d.version_for(f);
+            text(g_semibold, 13.5f, P.text, (f.name + (version.empty() ? "" : " · " + version) + " · " +
+                human_size(f.size) + " · antivirus de GameBanana: " + (f.av_result.empty() ? "?" : f.av_result)).c_str(), width - px(44));
             ImGui::SetCursorPosX(px(34));
             std::string why = i < m.checks.size() ? m.checks[i].reason : "";
             if (i < m.checks.size() && m.checks[i].files) why = "cambia " + std::to_string(m.checks[i].files) + " archivo(s) de tu disco";
@@ -1194,7 +1215,7 @@ void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
         ImGui::SameLine(px(32));
         ImGui::BeginGroup();
         text(g_semibold, 14, P.text, it.name.c_str());
-        text(g_regular, 12, P.faint, (it.category + " · " + it.author).c_str());
+        text(g_regular, 12, P.faint, (it.category + " · " + it.author + (installed(it.id) ? " · Instalado" : "")).c_str());
         ImGui::EndGroup();
         ImGui::PopID();
     }
@@ -1235,12 +1256,12 @@ void mods_updates_tab(App& app, const ModsSnapshot& m, float x0, float width) {
     for (const auto& u : m.updates) {
         ImGui::PushID(u.key.c_str());
         ImGui::SetCursorPosX(px(22));
-        text(g_semibold, 14, P.text, (u.name + "  " + u.installed_version + (u.available ? "  →  " + u.latest_version : "")).c_str());
+        text(g_semibold, 14, P.text, (u.name + "  " + u.installed_version).c_str());
         ImGui::SetCursorPosX(px(34));
         text(g_regular, 13, u.available ? P.accent : P.faint, u.note.c_str(), width - px(56));
         if (u.available) {
             ImGui::SetCursorPosX(px(34));
-            if (button("Ver y actualizar", Btn::Secondary, !m.busy, px(180))) app.mods->open_detail(u.mod_id);
+            if (button("Ver y actualizar", Btn::Secondary, !m.busy, px(180))) app.mods->open_detail(u.mod_id, u.key);
         }
         ImGui::PopID();
     }
@@ -1402,6 +1423,10 @@ void mods_page(App& app, float width) {
         text(g_semibold, 14, in_profile ? P.text : P.dim, (im.name() + "  " + im.version()).c_str());
         ImGui::SameLine();
         text(g_regular, 12.5f, P.faint, (im.json["format"].str() + " · " + im.json["provider"].str() + (in_profile ? "" : same_id != profile.mods.end() ? " · otra versión activa" : "")).c_str());
+        for (const auto& dep : im.json["dependencies"].elements()) {
+            ImGui::SetCursorPosX(px(56));
+            text(g_regular, 13, P.dim, ("Requiere " + dep["id"].str() + " " + dep["version"].str()).c_str());
+        }
         ImGui::SetCursorPosX(px(56));
         if (in_profile) {
             size_t pos = (size_t)(entry - profile.mods.begin());
@@ -1455,26 +1480,37 @@ std::string seat_name(int seat) { return seat < 0 ? "Sin jugador" : "Jugador " +
 std::string room_token(App& app, const Game& g, const InstallStatus& s) {
     std::string error;
     app.room_fingerprint = active_fingerprint(g, &error);
-    if (!error.empty()) app.room_error = "Tu perfil de mods tiene un problema (" + error + "): arréglalo en Mods antes de jugar online.";
+    if (!error.empty()) {
+        app.room_error = "Tu perfil de mods tiene un problema (" + error + "). Revísalo en Mods.";
+        return {};
+    }
     return mods::mod_compat_token(g.adapter->compat_token(s), app.room_fingerprint);
 }
 
 // Anfitrión: publica el manifiesto de su perfil de mods activo en el puerto de la sala + 10 (solo lectura).
-void start_manifest_server(App& app, const Game& g) {
+void start_manifest_server(App& app, const Game& g, const InstallStatus& status) {
     app.manifest_server.reset();
     if (!app.room || !mods::game_support(g.manifest.game_id)) return;
-    std::string id = g.manifest.game_id;
-    fs::path root = g.root;
+    if (app.port > 65535 - mods::kManifestPortOffset) {
+        app.room_error = "El puerto de sala no deja espacio para publicar el manifiesto de mods.";
+        return;
+    }
+    const auto& id = g.manifest.game_id;
     std::string lobby = std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 1000000007);
-    auto server = std::make_unique<mods::ManifestServer>();
+    mods::ModStore store(id, mods::default_mods_root(id), mods::extracted_dir(id, g.root));
     std::string error;
-    bool ok = server->start((uint16_t)(app.port + mods::kManifestPortOffset), [id, root, lobby] {
-        mods::ModStore store(id, mods::default_mods_root(id), mods::extracted_dir(id, root));
-        std::string e;
-        mods::Profile p;
-        if (!store.open(e) || !store.load_profile(store.active_profile(), p, e)) p = mods::Profile{};
-        return store.support().game_id.empty() ? std::string() : mods::build_session_manifest(store, p, lobby, p.epoch).dump();
-    }, error);
+    mods::Profile profile;
+    if (!store.open(error) || !store.load_profile(store.active_profile(), profile, error)) {
+        app.room_error = "No se pudo publicar el perfil de mods: " + error + ".";
+        return;
+    }
+    const auto manifest = mods::build_session_manifest(store, profile, lobby, profile.epoch, status.revision);
+    if (manifest["effective_mod_fingerprint"].str() != app.room_fingerprint) {
+        app.room_error = "El perfil de mods cambió al abrir la sala.";
+        return;
+    }
+    auto server = std::make_unique<mods::ManifestServer>();
+    bool ok = server->start((uint16_t)(app.port + mods::kManifestPortOffset), [body = manifest.dump()] { return body; }, error);
     if (ok) app.manifest_server = std::move(server);
     else app.room_error = "La sala funciona, pero los demás no podrán comparar mods contigo: " + error + ".";
 }
@@ -1484,17 +1520,28 @@ void leave_room(App& app) {
     app.room.reset();
     app.manifest_server.reset();
     app.auto_join_armed = false;
+    app.join_preflight = false;
+    app.ready_pending = false;
     app.sync_consent = false;
     if (app.room_game >= 0) {
         Game& g = *app.games[app.room_game];
-        if (g.running_pid.load() == 0 && !g.preparing) end_mod_session(g);
+        if (g.running_pid.load() == 0 && !g.preparing) {
+            if (app.mods && app.mods_game == app.room_game) {
+                if (app.mods->snapshot().busy) app.mods->cancel();
+                else end_mod_session(g);
+                app.mods->session_end();
+            } else end_mod_session(g);
+        }
     }
     if (app.mods) app.mods->clear_messages();
 }
 
 void open_room(App& app, bool host) {
+    if (app.room || app.join_preflight) leave_room(app);
     Game& g = *app.games[app.selected];
     app.room_error.clear();
+    app.join_preflight = false;
+    app.ready_pending = false;
     app.room = g.adapter->make_room();
     app.room_game = app.selected;
     app.page = Page::Room;
@@ -1505,16 +1552,26 @@ void open_room(App& app, bool host) {
             std::lock_guard<std::mutex> lock(g.mutex);
             s = g.status;
         }
-        if (!app.room->host((uint16_t)app.port, app.name, room_token(app, g, s), app.room_error)) app.room.reset();
+        const auto token = room_token(app, g, s);
+        if (token.empty() || !app.room->host((uint16_t)app.port, app.name, token, app.room_error)) app.room.reset();
         app.addresses = local_addresses();
-        start_manifest_server(app, g);
+        start_manifest_server(app, g, s);
     }
 }
 
 void join_room(App& app, Game& g, const InstallStatus& s) {
     app.room = g.adapter->make_room();
     app.room_error.clear();
-    if (!app.room->join(app.address, (uint16_t)app.port, app.name, room_token(app, g, s), app.room_error)) app.room.reset();
+    const auto token = room_token(app, g, s);
+    if (token.empty() || !app.room->join(app.address, (uint16_t)app.port, app.name, token, app.room_error)) app.room.reset();
+}
+
+void open_room_mods(App& app, const Game& game) {
+    if (!app.mods) app.mods = std::make_unique<ModsService>([] { wake(); });
+    if (app.mods_game != app.room_game) {
+        app.mods->open(game.manifest.game_id, game.manifest.display_name, game.root);
+        app.mods_game = app.room_game;
+    }
 }
 
 const char* diff_text(mods::ModDiff d) {
@@ -1538,12 +1595,9 @@ const char* diff_text(mods::ModDiff d) {
 // arreglarla (perfil de sesión, descargas con consentimiento). El anfitrión nunca decide qué se descarga.
 void room_mods_card(App& app, Game& g, float x0, float width) {
     if (!mods::game_support(g.manifest.game_id) || !mods::game_support(g.manifest.game_id)->proven) return;
-    if (!app.mods) app.mods = std::make_unique<ModsService>([] { wake(); });
-    if (app.mods_game != app.room_game) {
-        app.mods->open(g.manifest.game_id, g.manifest.display_name, g.root);
-        app.mods_game = app.room_game;
-    }
+    open_room_mods(app, g);
     ModsSnapshot m = app.mods->snapshot();
+    const bool same_room = m.session_address == app.address && m.session_port == app.port;
     ImGui::Dummy(ImVec2(0, px(6)));
     ImGui::SetCursorPosX(x0);
     ImGui::BeginChild("##roommods", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
@@ -1565,16 +1619,20 @@ void room_mods_card(App& app, Game& g, float x0, float width) {
         if (m.total) t += "  (" + std::to_string((int)(100.0 * m.done / m.total)) + " %)";
         text(g_regular, 13.5f, P.accent, t.c_str(), width - px(44));
         ImGui::SetCursorPosX(px(22));
-        if (button("Cancelar", Btn::Ghost, true, px(120))) { app.mods->cancel(); app.auto_join_armed = false; }
+        if (button("Cancelar", Btn::Ghost, true, px(120))) {
+            app.mods->cancel();
+            app.auto_join_armed = false;
+            app.join_preflight = false;
+        }
     }
     if (!m.error.empty() || !m.notice.empty()) {
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 13.5f, m.error.empty() ? P.ok : P.bad, (m.error.empty() ? m.notice : m.error).c_str(), width - px(44));
     }
-    if (m.session_checked && !m.session_error.empty()) {
+    if (same_room && m.session_checked && !m.session_error.empty()) {
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 13.5f, P.warn, ("No se pudo comparar: " + m.session_error + ". Puedes intentar unirte igualmente: si los mods no coinciden, el anfitrión te rechazará.").c_str(), width - px(44));
-    } else if (m.session_checked) {
+    } else if (same_room && m.session_checked) {
         const mods::SessionDiff& d = m.session_diff;
         int extra = d.extra, missing = d.missing, wrong = d.wrong, disabled = d.disabled;
         std::string summary;
@@ -1596,6 +1654,13 @@ void room_mods_card(App& app, Game& g, float x0, float width) {
                 ImGui::SetCursorPosX(px(46));
                 text(g_regular, 12, P.faint, it.detail.c_str(), width - px(68));
             }
+            const auto& refs = m.session_manifest.mods;
+            auto wanted = std::find_if(refs.begin(), refs.end(), [&](const mods::SessionMod& mod) { return mod.id == it.id; });
+            if (wanted != refs.end())
+                for (const auto& dependency : wanted->dependencies) {
+                    ImGui::SetCursorPosX(px(46));
+                    text(g_regular, 12, P.faint, ("Requiere " + dependency.id + " " + dependency.version).c_str(), width - px(68));
+                }
         }
         bool any_download = std::any_of(d.items.begin(), d.items.end(), [](const mods::DiffItem& it) { return it.downloadable; });
         ImGui::SetCursorPosX(px(22));
@@ -1603,7 +1668,6 @@ void room_mods_card(App& app, Game& g, float x0, float width) {
             if (button("Usar los mods de la sala", Btn::Primary, !m.busy, px(250))) {
                 app.mods->session_use();
                 app.auto_join_armed = app.auto_join;
-                app.auto_session_tried = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Activa un perfil temporal igual al del anfitrión. Tu perfil habitual vuelve al salir.");
         } else if (d.game_ok && !d.compatible && any_download && !m.sync_planned) {
@@ -1630,7 +1694,6 @@ void room_mods_card(App& app, Game& g, float x0, float width) {
                         app.mods->sync_run();
                         app.sync_consent = false;
                         app.auto_join_armed = app.auto_join;
-                        app.auto_session_tried = false;
                     }
                     ImGui::SameLine();
                     if (button("No", Btn::Ghost, true, px(70))) app.sync_consent = false;
@@ -1701,9 +1764,21 @@ void room_page(App& app, float width) {
         ImGui::SetCursorPosX(px(22));
         ImGui::Dummy(ImVec2(px(0), px(4)));
         ImGui::SetCursorPosX(px(22));
-        if (button("Unirse", Btn::Primary, app.address[0] != 0, px(140), "Escribe la dirección del anfitrión.")) join_room(app, g, s);
+        const auto* support = mods::game_support(g.manifest.game_id);
+        const bool can_compare = support && support->proven;
+        const bool mods_busy = can_compare && app.mods && app.mods_game == app.room_game && app.mods->snapshot().busy;
+        if (button("Unirse", Btn::Primary, app.address[0] != 0 && !mods_busy, px(140), "Escribe la dirección del anfitrión.")) {
+            if (!can_compare) {
+                join_room(app, g, s);
+            } else {
+                open_room_mods(app, g);
+                app.room_error.clear();
+                app.join_preflight = true;
+                app.mods->session_compare(app.address, static_cast<uint16_t>(app.port));
+            }
+        }
         ImGui::SameLine();
-        if (button("Crear sala", Btn::Secondary, true, px(140))) open_room(app, true);
+        if (button("Crear sala", Btn::Secondary, !mods_busy, px(140))) open_room(app, true);
         ImGui::Dummy(ImVec2(0, px(12)));
         ImGui::EndChild();
         room_mods_card(app, g, x0, width);
@@ -1729,6 +1804,11 @@ void room_page(App& app, float width) {
     bool hosting = mode == RoomMode::Hosting;
     ImGui::SetCursorPosX(x0);
     text(g_regular, 14, P.dim, room.status().c_str(), width);
+    if (app.ready_pending || !app.room_error.empty()) {
+        ImGui::SetCursorPosX(x0);
+        text(g_regular, 13.5f, app.ready_pending ? P.accent : P.warn,
+             app.ready_pending ? "Verificando los mods de la partida…" : app.room_error.c_str(), width);
+    }
     if (hosting) {
         std::string line = "Tus direcciones: ";
         for (size_t i = 0; i < app.addresses.size(); ++i) line += (i ? ", " : "") + app.addresses[i] + (app.addresses[i].rfind("25.", 0) == 0 ? " (Hamachi)" : "");
@@ -1788,9 +1868,20 @@ void room_page(App& app, float width) {
                 }
                 ImGui::SetCursorPosX(x0);
             }
-            if (button("Empezar", Btn::Primary, room.can_start(), px(150), "Cada jugador necesita su propio puesto y estar listo.")) room.start(app.start_option);
-        } else if (button(me->ready ? "No estoy listo" : "Listo", me->ready ? Btn::Secondary : Btn::Primary, me->seat >= 0, px(160), "Elige antes un jugador.")) {
-            room.set_ready(!me->ready);
+            if (button("Empezar", Btn::Primary, room.can_start() && !app.ready_pending, px(150), "Cada jugador necesita su propio puesto y estar listo.")) {
+                if (mods::game_support(g.manifest.game_id)) {
+                    open_room_mods(app, g);
+                    app.ready_pending = true;
+                    app.mods->verify_ready(app.room_fingerprint);
+                } else room.start(app.start_option);
+            }
+        } else if (button(me->ready ? "No estoy listo" : "Listo", me->ready ? Btn::Secondary : Btn::Primary,
+                          me->seat >= 0 && !app.ready_pending, px(160), "Elige antes un jugador.")) {
+            if (!me->ready && mods::game_support(g.manifest.game_id)) {
+                open_room_mods(app, g);
+                app.ready_pending = true;
+                app.mods->verify_ready(app.room_fingerprint);
+            } else room.set_ready(!me->ready);
         }
         ImGui::SameLine();
     } else {
@@ -1988,12 +2079,41 @@ int main(int argc, char** argv) {
         }
         app.updates->pump();
         if (g_minimize_launcher.exchange(false)) SDL_MinimizeWindow(window);   // el juego no pudo pasar al frente
+        if (app.ready_pending && app.room && app.mods) {
+            const auto ms = app.mods->snapshot();
+            if (!ms.busy) {
+                app.ready_pending = false;
+                if (ms.ready_verified) {
+                    app.room_error.clear();
+                    if (app.room->mode() == RoomMode::Hosting && app.room->can_start()) app.room->start(app.start_option);
+                    else if (app.room->mode() == RoomMode::Joined) app.room->set_ready(true);
+                } else app.room_error = "Revisa tus mods antes de continuar. " + ms.ready_error;
+            }
+        }
+        if (app.join_preflight && app.mods && app.page == Page::Room && app.room_game >= 0) {
+            const auto ms = app.mods->snapshot();
+            if (!ms.busy) {
+                app.join_preflight = false;
+                if (ms.session_address == app.address && ms.session_port == app.port && ms.session_checked &&
+                    (ms.session_diff.compatible || !ms.session_error.empty())) {
+                    Game& rg = *app.games[app.room_game];
+                    InstallStatus rs;
+                    {
+                        std::lock_guard<std::mutex> lock(rg.mutex);
+                        rs = rg.status;
+                    }
+                    join_room(app, rg, rs);
+                } else if (!ms.ready) app.room_error = ms.error;
+            }
+        }
         // Mods de la sala: unirse solo, si se pidió, cuando la comparación diga que todo coincide (C17/C18).
         if (app.auto_join_armed && app.mods && app.page == Page::Room && app.room_game >= 0 && (!app.room || app.room->mode() == RoomMode::Idle)) {
             ModsSnapshot ms = app.mods->snapshot();
             if (!ms.busy) {
                 Game& rg = *app.games[app.room_game];
-                if (ms.session_checked && ms.session_diff.compatible) {
+                if (ms.session_address != app.address || ms.session_port != app.port) {
+                    app.auto_join_armed = false;
+                } else if (ms.session_checked && ms.session_diff.compatible) {
                     InstallStatus rs;
                     {
                         std::lock_guard<std::mutex> lock(rg.mutex);
@@ -2001,9 +2121,6 @@ int main(int argc, char** argv) {
                     }
                     app.auto_join_armed = false;
                     join_room(app, rg, rs);
-                } else if (ms.session_checked && ms.session_diff.session_ready && !app.auto_session_tried) {
-                    app.auto_session_tried = true;
-                    app.mods->session_use();
                 } else {
                     app.auto_join_armed = false;   // no se pudo dejar todo listo: el usuario decide
                 }

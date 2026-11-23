@@ -24,6 +24,7 @@ $Only = @($Only | ForEach-Object { $_ -split "," } | Where-Object { $_ })  # -Fi
 $repo = Resolve-Path "$PSScriptRoot\..\.."
 $release = Join-Path $Bin "wl_release.exe"
 $results = New-Object System.Collections.Generic.List[object]
+$servers = New-Object System.Collections.Generic.List[object]
 $port = 18760
 
 function Hash($p) { (Get-FileHash $p -Algorithm SHA256).Hash.ToLower() }
@@ -76,6 +77,7 @@ function New-Feed($name, $ver, $exe, $signKey, $channel = "stable", [scriptblock
 function Start-Feed($root) {
     $script:port++
     $p = Start-Process $Python -ArgumentList "-I", "`"$repo\tests\e2e\feed_server.py`"", "`"$root`"", $script:port -PassThru -WindowStyle Hidden
+    $servers.Add($p)
     Start-Sleep -Milliseconds 700
     return @{ Proc = $p; Url = "http://127.0.0.1:$($script:port)/" }
 }
@@ -86,8 +88,23 @@ function Stop-Launchers($inst, $lad) {
     } | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
-function Log-Text($lad) { $l = "$lad\WiiLauncher\updater.log"; if (Test-Path $l) { [IO.File]::ReadAllText($l) } else { "" } }
-function Journal($lad) { $j = "$lad\WiiLauncher\updates\journal.txt"; if (Test-Path $j) { [IO.File]::ReadAllText($j) } else { "" } }
+# El observador permite que el launcher y el aplicador sigan escribiendo y rotando sus archivos.
+function Read-SharedText($path) {
+    if (-not (Test-Path -LiteralPath $path)) { return "" }
+    try {
+        $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+        try {
+            $reader = [IO.StreamReader]::new($stream)
+            return $reader.ReadToEnd()
+        } finally { $stream.Dispose() }
+    } catch [IO.IOException] {
+        return ""   # el siguiente sondeo recogerá el archivo si acaba de rotar
+    }
+}
+
+function Log-Text($lad) { Read-SharedText "$lad\WiiLauncher\updater.log" }
+function Journal($lad) { Read-SharedText "$lad\WiiLauncher\updates\journal.txt" }
 
 # Arranca el launcher con --auto-update y espera hasta que $until devuelva true (o 90 s).
 function Run-Launcher($inst, $lad, $feedUrl, [scriptblock]$until, [hashtable]$extraEnv = @{}, [string[]]$args2 = @("--auto-update"), [int]$timeout = 90) {
@@ -270,8 +287,9 @@ try {
         Record "UPD-12" "Clase (sin updater) -> ZIP puente 1.0.0 -> auto a 1.0.1" ($r.Ok -and (Hash "$inst\wii-launcher.exe") -eq $h101 -and (Data-Intact $inst $lad)) "puente manual una vez; después actualización automática en $($r.Secs) s"
     }
 } finally {
-    Stop-Process $srv.Proc -Force -ErrorAction SilentlyContinue
-    Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Python } | Stop-Process -Force -ErrorAction SilentlyContinue
+    foreach ($server in $servers) {
+        if (-not $server.HasExited) { Stop-Process -InputObject $server -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 $md = @("| ID | Escenario | Estado | Observado |", "|---|---|---|---|")
