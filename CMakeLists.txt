@@ -84,6 +84,7 @@ add_library(wl_mods STATIC
     mods/src/package.cpp
     mods/src/store.cpp
     mods/src/launch.cpp
+    mods/src/provider.cpp
     mods/src/gamebanana.cpp
     mods/src/session.cpp
     mods/src/lobby_mods.cpp)

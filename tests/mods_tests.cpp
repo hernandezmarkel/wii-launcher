@@ -522,11 +522,30 @@ void test_gamebanana(const fs::path& tmp) {
     CatalogDetail d;
     MCHECK(!gb.detail(9, d, e));
     // Ficha: archivos sin MD5 válido o con URL ajena se descartan
-    http.ok("https://gamebanana.com/apiv11/Mod/7/ProfilePage", R"({"_idRow":7,"_sName":"Mod 7","_sLicense":"<b>CC BY</b>","_aFiles":[
+    http.ok("https://gamebanana.com/apiv11/Mod/7/ProfilePage", R"({"_idRow":7,"_aGame":{"_idRow":6370},"_sName":"Mod 7","_sLicense":"<b>CC BY</b>","_aFiles":[
         {"_idRow":70,"_sFile":"bueno.zip","_nFilesize":4,"_sMd5Checksum":"5D41402ABC4B2A76B9719D911017C592","_sDownloadUrl":"https://gamebanana.com/dl/70"},
         {"_idRow":71,"_sFile":"malo.zip","_nFilesize":4,"_sMd5Checksum":"5d41402abc4b2a76b9719d911017c592","_sDownloadUrl":"https://evil.example/dl/71"},
         {"_idRow":72,"_sFile":"sinmd5.zip","_nFilesize":4,"_sDownloadUrl":"https://gamebanana.com/dl/72"}]})");
     MCHECK(gb.detail(7, d, e) && d.files.size() == 1 && d.license == "CC BY" && d.files[0].md5 == "5d41402abc4b2a76b9719d911017c592");
+    MCHECK(d.available_for(6370) && !d.available_for(6248));
+    CatalogDetail variants = d;
+    variants.files[0].version = "1.0";
+    variants.files.push_back(variants.files[0]);
+    variants.files.back().id = 99;
+    variants.files.back().version = "2.0";
+    variants.files.back().added = 200;
+    SessionMod wanted;
+    wanted.source_id = "7";
+    wanted.version = "1.0";
+    MCHECK(resolve_catalog_file(variants, wanted) == &variants.files[0]);
+    wanted.source_file_id = "70";
+    wanted.source_md5 = variants.files[0].md5;
+    MCHECK(resolve_catalog_file(variants, wanted) == &variants.files[0]);
+    variants.files[0].md5 = std::string(32, 'a');
+    MCHECK(!resolve_catalog_file(variants, wanted));
+    wanted.source_file_id.clear();
+    variants.files.back().version = "1.0";
+    MCHECK(!resolve_catalog_file(variants, wanted));
     // Descarga: redirección a files.gamebanana.com permitida; MD5 de "hello" correcto
     http.redirect("https://gamebanana.com/dl/70", "https://files.gamebanana.com/mods/bueno.zip");
     http.ok("https://files.gamebanana.com/mods/bueno.zip", "hello");
@@ -581,6 +600,7 @@ void test_session(const fs::path& tmp) {
     write_zip(tmp / "sx.zip", {{"files/locale/sp_EU/mess.bin", "X"}});
     ModMeta a, b, x;
     a.id = "gamebanana.111"; a.name = "A"; a.version = "1.0"; a.provider = "gamebanana"; a.source_id = "111";
+    a.source_file_id = "456"; a.source_md5 = std::string(32, 'a');
     b.id = "local.b"; b.name = "B"; b.version = "1.0";
     x.id = "local.x"; x.name = "X"; x.version = "1.0";
     InstalledMod ha, hb, ga, gb, gb2, gx;
@@ -591,6 +611,13 @@ void test_session(const fs::path& tmp) {
     SessionManifest m;
     MCHECK(parse_session_manifest(mj.dump(), m, e));
     MCHECK(m.mods.size() == 2 && m.fingerprint == host.compute(hp).fingerprint && m.revision == 3);
+    MCHECK(m.mods[0].source_file_id == "456" && m.mods[0].source_md5 == a.source_md5 &&
+           m.mods[0].package_sha256 == ha.json["package_sha256"].str());
+    InstalledMod rejected;
+    MCHECK(!guest.install(tmp / "sa.zip", a, rejected, e, {}, {}, {m.mods[1].content_sha256, {}}));
+    MCHECK(guest.installed().empty());
+    MCHECK(!host.install(tmp / "sa.zip", a, rejected, e, {}, {}, {{}, std::string(64, 'a')}));
+    MCHECK(host.find_installed(ha.key, rejected) && host.verify(rejected, e));
 
     // C04/C05: al invitado le falta todo; A se puede pedir a GameBanana, B (importado a mano) no.
     Profile gp;
@@ -638,6 +665,14 @@ void test_session(const fs::path& tmp) {
     g2p.mods = {{g2a.id(), g2a.key, true, {}}, {g2b.id(), g2b.key, true, {}}};
     d = diff_session(guest2, g2p, m);
     MCHECK(!d.compatible && d.items[1].state == ModDiff::WrongHash && !d.session_ready);
+    ModMeta other_version = b;
+    other_version.version = "2.0";
+    InstalledMod same_bytes;
+    MCHECK(guest2.install(tmp / "sb.zip", other_version, same_bytes, e));
+    SessionManifest expected_version = m;
+    expected_version.mods[1].version = "3.0";
+    d = diff_session(guest2, g2p, expected_version);
+    MCHECK(d.items[1].state == ModDiff::WrongVersion && !d.session_ready);
     // C02: otro disco base
     SessionManifest other = m;
     other.base_content_id = "SUPE01:0000000000000000";
@@ -665,6 +700,7 @@ void test_session(const fs::path& tmp) {
     MCHECK(!hostile("id", Json("A.Mayus")));
     MCHECK(!hostile("effective_content_sha256", Json("no-es-hex")));
     MCHECK(!hostile("load_order", Json(-1)));
+    MCHECK(!hostile("load_order", Json(int64_t(4294967296))));
     {
         // Una URL o ruta en el manifiesto no se usa para nada: source desconocido → no descargable.
         Json bad = mj;

@@ -179,6 +179,8 @@ bool Profile::from_json(const Json& j, Profile& out, std::string& error) {
 ModStore::ModStore(std::string game_id, fs::path data_root, fs::path extracted_dir)
     : game_(std::move(game_id)), root_(std::move(data_root)), extracted_(std::move(extracted_dir)) {}
 
+fs::path ModStore::download_path() const { return root_ / "cache" / "downloads" / (op_id() + ".zip"); }
+
 bool ModStore::open(std::string& error) {
     support_ = game_support(game_);
     if (!support_) { error = "este juego no admite mods en el launcher"; return false; }
@@ -218,7 +220,7 @@ bool ModStore::preview(const fs::path& source, PackagePlan& plan, std::string& e
 }
 
 bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod& out, std::string& error,
-                       const Progress& progress, const Cancel& cancel) {
+                       const Progress& progress, const Cancel& cancel, const InstallHashes& expected) {
     StoreLock lock(root_ / "locks" / "store.lock");
     if (!lock.held()) { error = "hay otra operación de mods en curso (¿otro launcher abierto?)"; return false; }
     auto src = open_source(source, error);
@@ -253,6 +255,13 @@ bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod
     }
     std::string content_sha = sha256_hex(content.dump());
     std::string package_sha = fs::is_directory(source, ec) ? content_sha : sha256_file_hex(source);
+    if (package_sha.empty() || (!expected.package_sha256.empty() && package_sha != expected.package_sha256) ||
+        (!expected.content_sha256.empty() && content_sha != expected.content_sha256)) {
+        cleanup();
+        error = "el archivo descargado no coincide con los hashes de la versión solicitada";
+        return false;
+    }
+    if (cancel && cancel()) { cleanup(); error = "cancelado"; return false; }
 
     Json mod = Json::object();
     std::string id = meta.id;
@@ -326,6 +335,9 @@ bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod
     fs::path final_dir = root_ / "packages" / key;
     if (fs::exists(final_dir / "mod.json")) {
         cleanup();   // ya instalado idéntico: no se duplica (B11)
+        if (find_installed(key, out)) return verify(out, error);
+        error = "la copia instalada del paquete no se puede leer";
+        return false;
     } else {
         fs::remove_all(final_dir, ec);
         fs::rename(stage, final_dir, ec);
@@ -510,6 +522,8 @@ Effective ModStore::compute(const Profile& profile) const {
         m.set("version", mod.version());
         m.set("source", mod.json["provider"].str());
         m.set("source_id", mod.json["source_id"].str());
+        m.set("source_file_id", mod.json["source_file_id"].str());
+        m.set("source_md5", mod.json["source_md5"].str());
         m.set("package_sha256", mod.json["package_sha256"].str());
         m.set("effective_content_sha256", mod.content_sha());
         m.set("load_order", order++);

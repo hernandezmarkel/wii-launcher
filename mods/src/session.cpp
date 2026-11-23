@@ -10,8 +10,13 @@ namespace wl::mods {
 
 namespace {
 
-bool is_hex64(const std::string& s) {
-    return s.size() == 64 && std::all_of(s.begin(), s.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)) || (c >= 'a' && c <= 'f'); });
+bool is_hex(const std::string& s, size_t length) {
+    return s.size() == length && std::all_of(s.begin(), s.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
+
+bool provider_id(const std::string& s) {
+    return !s.empty() && s.size() <= 12 && s.front() != '0' &&
+           std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
 
 bool valid_mod_id(const std::string& s) {
@@ -63,7 +68,8 @@ Json build_session_manifest(const ModStore& store, const Profile& profile, const
     size_t i = 0;
     for (const auto& m : eff.manifest_mods.elements()) {
         Json o = Json::object();
-        for (const char* k : {"id", "name", "version", "source", "source_id", "effective_content_sha256", "config_sha256", "load_order"}) o.set(k, m[k]);
+        for (const char* k : {"id", "name", "version", "source", "source_id", "source_file_id", "source_md5",
+                              "package_sha256", "effective_content_sha256", "config_sha256", "load_order"}) o.set(k, m[k]);
         // Opciones elegidas (Riivolution): son configuración, no órdenes; el cliente las usa en su perfil de sesión.
         Json ch = Json::object();
         size_t n = 0;
@@ -105,9 +111,10 @@ bool parse_session_manifest(const std::string& text, SessionManifest& out, std::
         error = "manifiesto de sala con campos no válidos";
         return false;
     }
-    if (out.fingerprint != kVanilla && !is_hex64(out.fingerprint)) { error = "huella de mods no válida"; return false; }
+    if (out.fingerprint != kVanilla && !is_hex(out.fingerprint, 64)) { error = "huella de mods no válida"; return false; }
     if (!j["mods"].is_array() || j["mods"].size() > kMaxSessionMods) { error = "lista de mods no válida"; return false; }
     std::set<std::string> ids;
+    std::set<int64_t> positions;
     for (const auto& m : j["mods"].elements()) {
         SessionMod s;
         s.id = m["id"].str();
@@ -115,17 +122,28 @@ bool parse_session_manifest(const std::string& text, SessionManifest& out, std::
         s.version = m["version"].str();
         s.source = m["source"].str();
         s.source_id = m["source_id"].str();
+        s.source_file_id = m["source_file_id"].str();
+        s.source_md5 = m["source_md5"].str();
+        s.package_sha256 = m["package_sha256"].str();
         s.content_sha256 = m["effective_content_sha256"].str();
         s.config_sha256 = m["config_sha256"].str();
-        s.load_order = static_cast<int>(m["load_order"].num(-1));
+        const int64_t order = m["load_order"].num(-1);
         if (!valid_mod_id(s.id) || !ids.insert(s.id).second || !short_text(s.name, 200) || !short_text(s.version, 40) ||
-            !is_hex64(s.content_sha256) || !is_hex64(s.config_sha256) || s.load_order < 0) {
+            !is_hex(s.content_sha256, 64) || !is_hex(s.config_sha256, 64) || order < 0 ||
+            order >= static_cast<int64_t>(j["mods"].size()) || !positions.insert(order).second) {
             error = "un mod del manifiesto no es válido";
             return false;
         }
+        s.load_order = static_cast<int>(order);
         if (s.source != "local" && s.source != "gamebanana") s.source = "desconocido";   // nunca se descarga de ahí
-        if (s.source_id.size() > 12 || !std::all_of(s.source_id.begin(), s.source_id.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); }))
+        if (!provider_id(s.source_id)) s.source_id.clear();
+        if ((!s.source_file_id.empty() || !s.source_md5.empty()) &&
+            (!provider_id(s.source_file_id) || !is_hex(s.source_md5, 32)))
             s.source_id.clear();
+        if (!s.package_sha256.empty() && !is_hex(s.package_sha256, 64)) {
+            error = "hash del paquete no válido";
+            return false;
+        }
         for (const auto& [k, v] : m["choices"].items()) {
             if (!short_text(k, 120) || !v.is_int() || v.num() < 0 || v.num() > 64) { error = "opciones no válidas en el manifiesto"; return false; }
             s.choices[k] = static_cast<int>(v.num());
@@ -172,7 +190,7 @@ SessionDiff diff_session(const ModStore& store, const Profile& local, const Sess
         for (const auto& m : installed) {
             if (m.id() != h.id) continue;
             same_id = &m;
-            if (m.content_sha() == h.content_sha256) { exact = &m; break; }
+            if (m.version() == h.version && m.content_sha() == h.content_sha256) { exact = &m; break; }
         }
         auto entry = std::find_if(local.mods.begin(), local.mods.end(), [&](const ProfileEntry& e) { return e.id == h.id; });
         if (exact) {
@@ -200,7 +218,7 @@ SessionDiff diff_session(const ModStore& store, const Profile& local, const Sess
                 it.state = ModDiff::Missing;
                 d.missing++;
             }
-            it.downloadable = h.source == "gamebanana" && !h.source_id.empty();
+            it.downloadable = h.source == "gamebanana" && !h.source_id.empty() && h.id == h.source + "." + h.source_id;
             if (!it.downloadable) {
                 it.detail = h.source == "local" ? "El anfitrión lo importó a mano: pídele el archivo o su página e impórtalo tú."
                                                 : "Sin fuente autorizada para descargarlo.";

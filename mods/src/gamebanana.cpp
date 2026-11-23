@@ -68,6 +68,7 @@ std::string cache_name(const std::string& url) { return upd::sha256_hex(url).sub
 CatalogItem item_from(const Json& r) {
     CatalogItem it;
     it.id = r["_idRow"].num();
+    it.game = r["_aGame"]["_idRow"].num();
     it.name = r["_sName"].str().substr(0, 200);
     it.category = r["_aRootCategory"]["_sName"].str().substr(0, 80);
     it.author = r["_aSubmitter"]["_sName"].str().substr(0, 80);

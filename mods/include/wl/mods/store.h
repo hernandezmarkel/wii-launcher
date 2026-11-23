@@ -44,6 +44,10 @@ struct InstalledMod {
     std::string content_sha() const { return json["content_sha256"].str(); }
 };
 
+struct InstallHashes {
+    std::string content_sha256, package_sha256;
+};
+
 struct ProfileEntry {
     std::string id;
     std::string package;       // clave en packages/
@@ -94,6 +98,7 @@ public:
     const Fst& fst() const { return fst_; }
     const GameModSupport& support() const { return *support_; }
     const fs::path& root() const { return root_; }
+    fs::path download_path() const;
 
     using Progress = std::function<void(const std::string& what, uint64_t done, uint64_t total)>;
     using Cancel = std::function<bool()>;
@@ -102,7 +107,7 @@ public:
     bool preview(const fs::path& source, PackagePlan& plan, std::string& error) const;
     // Instala en packages/ de forma transaccional. No toca ningún perfil.
     bool install(const fs::path& source, const ModMeta& meta, InstalledMod& out, std::string& error,
-                 const Progress& progress = {}, const Cancel& cancel = {});
+                 const Progress& progress = {}, const Cancel& cancel = {}, const InstallHashes& expected = {});
     std::vector<InstalledMod> installed() const;
     bool find_installed(const std::string& key, InstalledMod& out) const;
     // Borra un paquete que ningún perfil usa.

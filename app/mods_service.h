@@ -57,7 +57,7 @@ struct ModsSnapshot {
     bool updates_checked = false;
     // Sala: comparación con el anfitrión y sincronización asistida
     struct SyncItem {
-        std::string id, name, source_id, file_name, reason;
+        std::string id, name, source_id, file_name, md5, reason;
         uint64_t size = 0;
         int64_t mod_id = 0, file_id = 0;
         bool ok = false;           // se puede descargar
@@ -107,6 +107,7 @@ public:
 private:
     void post(std::string busy_text, std::function<void()> job);
     void reload_locked();   // con mutex_ tomado; lee perfiles y paquetes (rápido)
+    void clear_pending_download();
     void run();
 
     std::function<void()> wake_;
@@ -118,7 +119,7 @@ private:
     std::atomic<bool> cancel_{false};
     std::unique_ptr<mods::ModStore> store_;
     std::unique_ptr<upd::HttpClient> http_;
-    std::unique_ptr<mods::GameBananaProvider> gb_;
+    std::unique_ptr<mods::ModProvider> gb_;
     mods::ModMeta pending_meta_;     // metadatos del proveedor para la instalación pendiente
     std::filesystem::path pending_download_;   // archivo descargado en staging (se borra al instalar o descartar)
     ModsSnapshot snap_;

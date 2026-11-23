@@ -20,6 +20,7 @@ constexpr size_t kMaxSessionMods = 200;
 
 struct SessionMod {
     std::string id, name, version, source, source_id;
+    std::string source_file_id, source_md5, package_sha256;
     std::string content_sha256, config_sha256;
     int load_order = 0;
     std::map<std::string, int> choices;
