@@ -15,8 +15,9 @@ Comprobado en vivo el 18/11/2026 (sin clave ni cuenta):
 IDs: Wii Party 6370, Mario Party 9 6248, Mario Kart Wii 5896, Brawl 5678.
 
 Política del cliente:
-- Solo HTTPS al puerto 443 de `gamebanana.com`, `api.gamebanana.com` y `files.gamebanana.com`; se comprueba en
-  **cada salto** de redirección (D11). Sin credenciales en la URL.
+- Solo HTTPS al puerto 443 de `gamebanana.com`, `api.gamebanana.com`, `files.gamebanana.com` y los mirrors
+  numerados `filecacheN.gamebanana.com`; se comprueba en cada salto. En la prueba real el ZIP pasó por
+  `filecache52.gamebanana.com`. Las referencias de sala llevan IDs y hashes.
 - ≥ 350 ms entre peticiones; reintentos con espera ante 429/5xx/sin red; caché de 10 min y uso de la caché antigua
   sin conexión (B05/E02). User-Agent identificable del launcher, sin datos del usuario.
 - Respuestas tratadas como no confiables: JSON con límites, registros incompletos o de otro juego descartados,

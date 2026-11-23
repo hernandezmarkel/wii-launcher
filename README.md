@@ -27,6 +27,10 @@ tests/      wl_tests (unitarios) y e2e/ (feed de staging local)
 docs/       arquitectura, updater (auditoría, ADR, publicación, seguridad, guía) y extensiones
 ```
 
+Los mods de datos están disponibles en Wii Party y Mario Party 9. La
+[guía de integración](docs/mods/04-integracion_juegos.md) recoge los formatos y
+[el estado del gestor](docs/mods/estado_y_bloqueos.md) enlaza las pruebas y el contrato de cuenta.
+
 ## Compilar
 
 Requisitos: CMake ≥ 3.20, Ninja y MinGW-w64 g++ (probado con GCC 15.2). En CI se usa MSYS2 UCRT64.

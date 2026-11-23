@@ -73,6 +73,10 @@ El SHA-256 del recurso original coincidió antes y después de la prueba. Las tr
 del fotograma 8 y los registros `a.log`, `b.log` y `c.log` quedaron en la carpeta temporal
 `%TEMP%/wl-mods-ab-a3265162`. No se distribuyen el ZIP ni las capturas.
 
+También se empaquetó el mismo recurso con un XML de Riivolution de solo archivos y una
+opción activa por defecto. Con el soporte habilitado se repitió el lanzamiento normal
+sin `WL_MODS_EXPERIMENTAL`. El port volvió a leer los 450 796 bytes del disco virtual.
+
 ## Sala simulada en un PC (`SIMULATED_NETWORK`, 19/11/2026)
 
 Dos launchers en el mismo portátil, por 127.0.0.1: el anfitrión con datos reales y el mod de textura activo

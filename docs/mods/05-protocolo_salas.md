@@ -51,3 +51,17 @@ Campos de más (p. ej. `download_url`) se ignoran.
   (falla cerrado); hay que cerrar y volver a abrir la sala.
 - El canal de manifiesto usa otro puerto: si un cortafuegos lo bloquea, la comparación falla con un mensaje claro y el
   gate del HELLO sigue protegiendo.
+
+## Continuación en beta.5
+
+El manifiesto v1 puede incluir la revisión del port, ID del ZIP, MD5 del proveedor y SHA-256
+del paquete. Las referencias antiguas siguen siendo legibles. Para recuperar una versión
+antigua hace falta una variante inequívoca y el contenido debe coincidir antes de que el
+almacén confirme la instalación. El anfitrión publica el manifiesto que corresponde a la
+huella negociada al crear la sala.
+
+Al pulsar «Unirse» se compara primero con el anfitrión. Si el canal de metadatos no responde,
+el HELLO existente sigue aplicando su comprobación de juego y mods. Al terminar la descarga
+asistida se comprueba que la sala sigue disponible y se activa el perfil temporal. «Listo»
+y «Empezar» esperan a que un hilo de trabajo vuelva a verificar el perfil y los paquetes
+activos. La compatibilidad del contenido no cambia el protocolo del port.
