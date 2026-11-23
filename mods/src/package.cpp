@@ -23,7 +23,7 @@ const GameModSupport* game_support(const std::string& game_id) {
     // estático (engine/src/core/modules.cpp), así que cambiarlos no cambia el juego: se bloquean.
     // `proven` solo pasa a true tras la prueba A/B en el port real (docs/mods/06-pruebas_resultados.md).
     static const GameModSupport wiiparty{"wiiparty", "wl-vdisc-1", true, {"rel/"}, {".rel", ".rel.lz", ".dol"}};
-    static const GameModSupport mp9{"mp9", "wl-vdisc-1", false, {"modules/", "rel/"}, {".rel", ".rel.lz", ".dol"}};
+    static const GameModSupport mp9{"mp9", "wl-vdisc-1", true, {"modules/", "rel/"}, {".rel", ".rel.lz", ".dol"}};
     if (game_id == wiiparty.game_id) return &wiiparty;
     if (game_id == mp9.game_id) return &mp9;
     return nullptr;
