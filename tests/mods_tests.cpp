@@ -3,12 +3,17 @@
 // Todo en carpetas temporales: nunca toca el disco extraído, la ROM ni los guardados reales.
 #include <zlib.h>
 
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <set>
+#include <thread>
+
+#include "mods_service.h"
 
 #include "wl/mods/fst.h"
 #include "wl/mods/gamebanana.h"
@@ -819,6 +824,84 @@ void test_session(const fs::path& tmp) {
     MCHECK(!fetch_manifest("127.0.0.1", port, got, e, 800));
 }
 
+void test_mods_service_update(const fs::path& tmp) {
+    auto data = tmp / "service-data";
+    const auto* value = std::getenv("WL_LOCALAPPDATA");
+    const std::string saved = value ? value : "";
+    _putenv_s("WL_LOCALAPPDATA", data.u8string().c_str());
+    const auto game = tmp / "service-wiiparty";
+    auto disc = game / "games" / "wiiparty" / "extracted";
+    make_disc(disc, kDisc);
+    write_zip(tmp / "old.zip", {{"files/opening.bnr", "versión original"}});
+    write_zip(tmp / "new.zip", {{"files/opening.bnr", "versión nueva"}});
+    const auto original_md5 = md5_file_hex(tmp / "old.zip");
+    const auto new_md5 = md5_file_hex(tmp / "new.zip");
+    const auto zip = get(tmp / "new.zip");
+    ModStore store("wiiparty", default_mods_root("wiiparty"), disc);
+    ModMeta meta;
+    meta.id = "gamebanana.7";
+    meta.name = "Actualizable";
+    meta.version = "1.0.0";
+    meta.provider = "gamebanana";
+    meta.source_id = "7";
+    meta.source_file_id = "70";
+    meta.source_md5 = original_md5;
+    meta.source_added = 10;
+    InstalledMod prior;
+    std::string error;
+    MCHECK(store.open(error) && store.install(tmp / "old.zip", meta, prior, error));
+    Profile profile;
+    profile.mods = {{prior.id(), prior.key, false, {}}};
+    MCHECK(store.save_profile(profile, error));
+
+    auto http = std::make_unique<MockHttp>();
+    MockHttp& mock = *http;
+    const auto download = "https://gamebanana.com/dl/71";
+    mock.ok("https://gamebanana.com/apiv11/Mod/7/ProfilePage",
+        "{\"_idRow\":7,\"_aGame\":{\"_idRow\":6370},\"_sName\":\"Actualizable\",\"_aFiles\":["
+        "{\"_idRow\":71,\"_sFile\":\"new.zip\",\"_nFilesize\":" + std::to_string(zip.size()) +
+        ",\"_sMd5Checksum\":\"" + new_md5 + "\",\"_tsDateAdded\":20,\"_sVersion\":\"2.0.0\","
+        "\"_sDownloadUrl\":\"https://gamebanana.com/dl/71\"}]}");
+    mock.ok("https://api.gamebanana.com/Core/Item/Data?itemtype=File&itemid=71&fields=Metadata().aArchiveFilesList()",
+        R"([["files/opening.bnr"]])");
+    mock.routes[download].status = 404;
+    {
+        wl::ModsService service({}, std::move(http));
+        auto idle = [&] {
+            auto until = std::chrono::steady_clock::now() + std::chrono::seconds(7);
+            auto snapshot = service.snapshot();
+            while (snapshot.busy && std::chrono::steady_clock::now() < until) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                snapshot = service.snapshot();
+            }
+            return snapshot;
+        };
+        service.open("wiiparty", "Wii Party", game);
+        MCHECK(idle().ready);
+        service.check_updates();
+        auto snapshot = idle();
+        MCHECK(snapshot.updates.size() == 1 && snapshot.updates[0].available);
+        service.open_detail(7, prior.key);
+        MCHECK(idle().has_detail);
+        service.download_file(7, 71);
+        snapshot = idle();
+        MCHECK(!snapshot.has_preview && !snapshot.error.empty() && snapshot.installed.size() == 1);
+        MCHECK(store.load_profile("default", profile, error) && profile.mods[0].package == prior.key && !profile.mods[0].enabled);
+
+        mock.ok(download, zip);
+        service.clear_messages();
+        service.download_file(7, 71);
+        snapshot = idle();
+        MCHECK(snapshot.has_preview && snapshot.preview.ok() && snapshot.preview_profile == "default");
+        service.install_preview("", "", false);
+        snapshot = idle();
+        MCHECK(snapshot.error.empty() && snapshot.installed.size() == 2);
+        MCHECK(store.load_profile("default", profile, error) && profile.mods[0].package != prior.key && !profile.mods[0].enabled);
+        MCHECK(store.verify(prior, error));
+    }
+    _putenv_s("WL_LOCALAPPDATA", saved.c_str());
+}
+
 }  // namespace
 
 void run_mods_tests() {
@@ -835,5 +918,6 @@ void run_mods_tests() {
     test_store(tmp);
     test_gamebanana(tmp);
     test_session(tmp);
+    test_mods_service_update(tmp);
     if (failures == before) fs::remove_all(tmp, ec);
 }

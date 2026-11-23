@@ -79,7 +79,7 @@ struct ModsSnapshot {
 
 class ModsService {
 public:
-    explicit ModsService(std::function<void()> wake);
+    explicit ModsService(std::function<void()> wake, std::unique_ptr<upd::HttpClient> http = {});
     ~ModsService();
 
     void open(const std::string& game_id, const std::string& game_name, const std::filesystem::path& install_root);

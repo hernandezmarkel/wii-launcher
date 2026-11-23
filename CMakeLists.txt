@@ -101,7 +101,8 @@ if(MINGW)
 endif()
 
 enable_testing()
-add_executable(wl_tests tests/tests.cpp tests/updater_tests.cpp tests/mods_tests.cpp)
+add_executable(wl_tests tests/tests.cpp tests/updater_tests.cpp tests/mods_tests.cpp app/mods_service.cpp)
+target_include_directories(wl_tests PRIVATE app)
 target_link_libraries(wl_tests PRIVATE wl_core wl_updater wl_mods)
 add_test(NAME wl_tests COMMAND wl_tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 

@@ -11,7 +11,8 @@ namespace wl {
 
 using namespace wl::mods;
 
-ModsService::ModsService(std::function<void()> wake) : wake_(std::move(wake)) {
+ModsService::ModsService(std::function<void()> wake, std::unique_ptr<upd::HttpClient> http)
+    : wake_(std::move(wake)), http_(std::move(http)) {
     thread_ = std::thread([this] { run(); });
 }
 
