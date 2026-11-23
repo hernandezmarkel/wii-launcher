@@ -88,8 +88,23 @@ function Stop-Launchers($inst, $lad) {
     } | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
-function Log-Text($lad) { $l = "$lad\WiiLauncher\updater.log"; if (Test-Path $l) { [IO.File]::ReadAllText($l) } else { "" } }
-function Journal($lad) { $j = "$lad\WiiLauncher\updates\journal.txt"; if (Test-Path $j) { [IO.File]::ReadAllText($j) } else { "" } }
+# El observador permite que el launcher y el aplicador sigan escribiendo y rotando sus archivos.
+function Read-SharedText($path) {
+    if (-not (Test-Path -LiteralPath $path)) { return "" }
+    try {
+        $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+        try {
+            $reader = [IO.StreamReader]::new($stream)
+            return $reader.ReadToEnd()
+        } finally { $stream.Dispose() }
+    } catch [IO.IOException] {
+        return ""   # el siguiente sondeo recogerá el archivo si acaba de rotar
+    }
+}
+
+function Log-Text($lad) { Read-SharedText "$lad\WiiLauncher\updater.log" }
+function Journal($lad) { Read-SharedText "$lad\WiiLauncher\updates\journal.txt" }
 
 # Arranca el launcher con --auto-update y espera hasta que $until devuelva true (o 90 s).
 function Run-Launcher($inst, $lad, $feedUrl, [scriptblock]$until, [hashtable]$extraEnv = @{}, [string[]]$args2 = @("--auto-update"), [int]$timeout = 90) {
