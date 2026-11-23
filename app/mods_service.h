@@ -35,6 +35,7 @@ struct ModsSnapshot {
     // Importación pendiente de confirmar
     bool has_preview = false;
     std::string preview_source;    // ruta en UTF-8
+    std::string preview_update, preview_profile;
     mods::PackagePlan preview;
     // Explorar (GameBanana)
     int64_t gb_game = 0;
@@ -45,10 +46,11 @@ struct ModsSnapshot {
     std::string catalog_error;
     bool has_detail = false;
     mods::CatalogDetail detail;
+    std::string detail_update;
     std::vector<mods::QuickCheck> checks;   // una por archivo de la ficha
     // Actualizaciones
     struct Update {
-        std::string key, name, installed_version, latest_version, latest_file;
+        std::string key, name, installed_version;
         int64_t mod_id = 0;
         bool available = false;
         std::string note;
@@ -71,6 +73,8 @@ struct ModsSnapshot {
     bool sync_planned = false;
     std::vector<SyncItem> sync;
     bool session_active = false;   // el perfil activo es el temporal de una sala
+    bool ready_verified = false;
+    std::string ready_error;
 };
 
 class ModsService {
@@ -91,7 +95,7 @@ public:
     void uninstall(const std::string& key);
     void cancel() { cancel_ = true; }
     void browse(int page, const std::string& search);
-    void open_detail(int64_t mod_id);
+    void open_detail(int64_t mod_id, const std::string& old_key = {});
     void close_detail();
     // Tras el consentimiento explícito del usuario: descarga a staging y abre la revisión previa.
     void download_file(int64_t mod_id, int64_t file_id);
@@ -102,12 +106,14 @@ public:
     void sync_run();               // tras el consentimiento: descarga, instala y vuelve a comparar
     void session_use();            // activa el perfil de sesión que reproduce el del anfitrión
     void session_end();            // vuelve al perfil habitual
+    void verify_ready(const std::string& fingerprint);
     void clear_messages();
 
 private:
     void post(std::string busy_text, std::function<void()> job);
     void reload_locked();   // con mutex_ tomado; lee perfiles y paquetes (rápido)
     void clear_pending_download();
+    void apply_room_profile();
     void run();
 
     std::function<void()> wake_;
@@ -120,8 +126,10 @@ private:
     std::unique_ptr<mods::ModStore> store_;
     std::unique_ptr<upd::HttpClient> http_;
     std::unique_ptr<mods::ModProvider> gb_;
+    std::string game_revision_;
     mods::ModMeta pending_meta_;     // metadatos del proveedor para la instalación pendiente
     std::filesystem::path pending_download_;   // archivo descargado en staging (se borra al instalar o descartar)
+    std::string pending_old_key_, pending_profile_;
     ModsSnapshot snap_;
 };
 
