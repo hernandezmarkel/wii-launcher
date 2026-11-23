@@ -1745,6 +1745,7 @@ void room_page(App& app, float width) {
     if (mode == RoomMode::Idle) {
         ImGui::SetCursorPosX(x0);
         ImGui::BeginChild("##join", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+        ImGui::BeginDisabled(app.join_preflight);
         ImGui::SetCursorPos(ImVec2(px(22), px(18)));
         text(g_regular, 13, P.faint, "Tu nombre");
         ImGui::SetCursorPosX(px(22));
@@ -1761,28 +1762,33 @@ void room_page(App& app, float width) {
             app.port = std::clamp(app.port, 1024, 65534);
             app.prefs.set("online_port", std::to_string(app.port));
         }
+        ImGui::EndDisabled();
         ImGui::SetCursorPosX(px(22));
         ImGui::Dummy(ImVec2(px(0), px(4)));
         ImGui::SetCursorPosX(px(22));
         const auto* support = mods::game_support(g.manifest.game_id);
         const bool can_compare = support && support->proven;
         const bool mods_busy = can_compare && app.mods && app.mods_game == app.room_game && app.mods->snapshot().busy;
-        if (button("Unirse", Btn::Primary, app.address[0] != 0 && !mods_busy, px(140), "Escribe la dirección del anfitrión.")) {
+        const bool joining = app.join_preflight || app.auto_join_armed;
+        if (button(joining ? "Comprobando…" : "Unirse", Btn::Primary, app.address[0] != 0 && !joining, px(140),
+                   joining ? "Esperando la comprobación de los mods." : "Escribe la dirección del anfitrión.")) {
             if (!can_compare) {
                 join_room(app, g, s);
             } else {
                 open_room_mods(app, g);
                 app.room_error.clear();
                 app.join_preflight = true;
+                app.sync_consent = false;
                 app.mods->session_compare(app.address, static_cast<uint16_t>(app.port));
             }
         }
         ImGui::SameLine();
-        if (button("Crear sala", Btn::Secondary, !mods_busy, px(140))) open_room(app, true);
+        if (button("Crear sala", Btn::Secondary, !mods_busy && !joining, px(140))) open_room(app, true);
         ImGui::Dummy(ImVec2(0, px(12)));
         ImGui::EndChild();
         room_mods_card(app, g, x0, width);
-        std::string msg = !app.room_error.empty() ? app.room_error : app.room ? app.room->status() : "";
+        std::string msg = app.room_error;
+        if (msg.empty() && !joining && app.room) msg = app.room->status();
         // El rechazo por «otra versión» también llega cuando los mods no coinciden (el token incluye su huella).
         if (!msg.empty() && mods::game_support(g.manifest.game_id) && msg.find("versi") != std::string::npos)
             msg += " Si los dos tenéis el mismo juego, puede que vuestros mods sean distintos: pulsa «Comparar mods».";
@@ -1794,7 +1800,8 @@ void room_page(App& app, float width) {
     }
     if (mode == RoomMode::Joining) {
         ImGui::SetCursorPosX(x0);
-        text(g_regular, 15, P.dim, "Conectando con el anfitrión…");
+        const auto status = app.room->status();
+        text(g_regular, 15, P.dim, status.empty() ? "Conectando con el anfitrión…" : status.c_str());
         ImGui::SetCursorPosX(x0);
         if (button("Cancelar", Btn::Secondary, true, px(140))) leave_room(app);
         return;
@@ -2072,7 +2079,7 @@ int main(int argc, char** argv) {
                 Game& g = *app.games[app.room_game];
                 auto spec = g.adapter->online(g.root, start);
                 if (spec) launch_modded(g, *spec, app.room_fingerprint);
-                else app.room_error = "La sala empezó pero este PC no tiene puesto: no se abre el juego.";
+                else set_message(g, "No se pudo abrir el juego con los datos de la sala.", true);
                 app.page = Page::Game;
             }
             redraw = std::max(redraw, 1);

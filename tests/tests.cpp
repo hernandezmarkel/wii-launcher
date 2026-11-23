@@ -199,6 +199,8 @@ int main() {
         bool gx = false;
         pump(*host, *stranger, sh, sx, gh, gx, 300);
         CHECK(stranger->mode() == RoomMode::Idle);  // rechazado por versión
+        CHECK(stranger->status().find("different version") != std::string::npos ||
+              stranger->status().find("otra versión") != std::string::npos);
         CHECK(host->members().size() == 2);
         guest->choose_seat(1);
         pump(*host, *guest, sh, sg, gh, gg, 200);
@@ -206,6 +208,9 @@ int main() {
         pump(*host, *guest, sh, sg, gh, gg, 200);
         CHECK(host->can_start());
         host->start(1);
+        gh = host->poll(sh);
+        CHECK(host->mode() == RoomMode::Hosting);  // debe seguir atendiendo el cierre de la sala
+        host->leave();  // el launcher original puede cerrar antes de que el invitado lea START
         pump(*host, *guest, sh, sg, gh, gg, 400);
         CHECK(gh && gg);
         CHECK(sh.session == sg.session && sh.session != 0);
@@ -213,8 +218,42 @@ int main() {
         CHECK(sh.seat == 0 && sg.seat == 1);
         CHECK(sh.min_delay == 3 && sg.min_delay == 3);
         CHECK(sh.host.empty() && sg.host == "127.0.0.1");
+        auto host_spec = a->online(inst, sh);
+        CHECK(host_spec && host_spec->env.at("WP_NET_HOST").empty() && host_spec->env.at("WP_NET_SEAT") == "0");
         auto spec = a->online(inst, sg);
         CHECK(spec && spec->env.at("WP_NET_SEATS") == "3" && spec->env.at("WP_NET_SEAT") == "1");
+    }
+
+    // Si se corta la primera conexión antes de WELCOME, se retoma sin volver a pulsar Unirse.
+    {
+        using namespace std::chrono_literals;
+        auto host = a->make_room();
+        auto guest = a->make_room();
+        std::string err;
+        constexpr uint16_t port = 47715;
+        CHECK(host->host(port, "Ana", "d755eb8/SSQE01", err));
+        CHECK(guest->join("127.0.0.1", port, "Beñat", "d755eb8/SSQE01", err));
+        SessionStart start;
+        const auto pending_until = std::chrono::steady_clock::now() + 100ms;
+        while (std::chrono::steady_clock::now() < pending_until) {
+            guest->poll(start);  // El anfitrión todavía no lee HELLO ni envía WELCOME.
+            std::this_thread::sleep_for(5ms);
+        }
+        host->leave();
+        const auto unavailable_until = std::chrono::steady_clock::now() + 150ms;
+        while (std::chrono::steady_clock::now() < unavailable_until) {
+            guest->poll(start);
+            std::this_thread::sleep_for(5ms);
+        }
+        CHECK(guest->mode() == RoomMode::Joining);
+        CHECK(host->host(port, "Ana", "d755eb8/SSQE01", err));
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (guest->mode() == RoomMode::Joining && std::chrono::steady_clock::now() < deadline) {
+            host->poll(start);
+            guest->poll(start);
+            std::this_thread::sleep_for(5ms);
+        }
+        CHECK(guest->mode() == RoomMode::Joined && host->members().size() == 2);
     }
 
     // 12b. Sala de Wii Party (lobby.cpp original) por loopback, y su compat_token

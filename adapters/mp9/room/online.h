@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -61,9 +62,12 @@ private:
         int id = 0;
         std::string in;
         std::string out;
+        bool connecting = false;
         bool greeted = false;
     };
 
+    bool connect_to_host(std::string& error);
+    void retry_join(const char* error);
     void send_line(Peer& peer, const std::string& line);
     void broadcast(const std::string& line);
     void broadcast_state();
@@ -81,6 +85,8 @@ private:
     std::string name_;
     std::string address_;
     uint16_t port_ = kDefaultPort;
+    std::chrono::steady_clock::time_point join_deadline_;
+    int join_retries_ = 0;
     int self_ = 0;
     int next_id_ = 1;
     std::string status_;
