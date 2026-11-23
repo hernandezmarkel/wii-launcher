@@ -113,6 +113,8 @@ struct HttpRequest {
     uint64_t max_bytes = kMaxManifestBytes;  // se corta (error) si la respuesta es mayor
     fs::path to_file;                        // si no está vacío, el cuerpo va a este archivo y no a body
     std::function<bool(uint64_t got, uint64_t total)> progress;  // false = cancelar
+    std::string method = "GET";
+    std::string body;
 };
 
 struct HttpResponse {
@@ -129,6 +131,9 @@ class HttpClient {
 public:
     virtual ~HttpClient() = default;
     virtual HttpResponse get(const HttpRequest& request) = 0;
+    virtual HttpResponse perform(const HttpRequest& request) {
+        return request.method == "GET" && request.body.empty() ? get(request) : HttpResponse{};
+    }
 };
 std::unique_ptr<HttpClient> make_winhttp_client();
 

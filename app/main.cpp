@@ -34,6 +34,7 @@
 #include "mods_service.h"
 #include "prefs.h"
 #include "update_service.h"
+#include "wl/account/service.h"
 #include "wl/catalog.h"
 #include "wl/mods/launch.h"
 #include "wl/mods/lobby_mods.h"
@@ -200,7 +201,7 @@ struct Game {
     bool lan_loaded = false;
 };
 
-enum class Page { Game, Room, Launcher, Mods };
+enum class Page { Game, Room, Launcher, Mods, Account };
 
 struct App {
     std::vector<std::unique_ptr<Game>> games;
@@ -208,6 +209,12 @@ struct App {
     int selected = 0;
     Page page = Page::Game;
     Prefs prefs;
+    std::unique_ptr<account::AccountService> accounts;
+    char account_email[255] = {};
+    char account_password[256] = {};
+    char account_code[7] = {};
+    char account_alias[25] = {};
+    bool account_recovery = false;
     std::unique_ptr<RoomSession> room;
     int room_game = -1;
     char name[32] = {};
@@ -766,6 +773,92 @@ void update_toast(App& app, const ImVec2& display) {
     ImGui::PopStyleColor(2);
 }
 
+
+void account_page(App& app, float width) {
+    const float x0 = ImGui::GetCursorPosX();
+    ImGui::SetCursorPos(ImVec2(x0, px(34)));
+    if (button("‹ Ajustes", Btn::Ghost, true, px(110))) {
+        app.page = Page::Launcher;
+        return;
+    }
+    ImGui::SetCursorPosX(x0);
+    text(g_semibold, 28, P.text, "Cuenta");
+    const auto view = app.accounts->view();
+    ImGui::SetCursorPosX(x0);
+    if (!view.configured) {
+        text(g_regular, 14, P.dim, "Puedes seguir jugando como invitado. El servicio de cuentas aún no está configurado.", width);
+        return;
+    }
+    if (view.busy) {
+        text(g_regular, 14, P.accent, "Comprobando la cuenta…", width);
+        ImGui::SetCursorPosX(x0);
+    } else if (!view.message.empty()) {
+        text(g_regular, 14, view.warning ? P.warn : P.ok, view.message.c_str(), width);
+        ImGui::SetCursorPosX(x0);
+    }
+
+    ImGui::BeginChild("##account", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+    ImGui::BeginDisabled(view.busy);
+    if (view.signed_in) {
+        text(g_regular, 14, P.text, view.alias.empty() ? "Añade un alias público a tu perfil." : ("Alias público · " + view.alias).c_str());
+        ImGui::SetCursorPosX(px(22));
+        ImGui::SetNextItemWidth(px(250));
+        ImGui::InputTextWithHint("##alias", "Nuevo alias", app.account_alias, sizeof app.account_alias);
+        ImGui::SetCursorPosX(px(22));
+        if (button("Guardar alias", Btn::Primary, account::valid_alias(app.account_alias), px(140), "Entre 3 y 24 letras sin tildes, números, espacios o guiones.")) {
+            app.accounts->set_alias(app.account_alias);
+            app.account_alias[0] = '\0';
+        }
+        ImGui::SameLine();
+        if (button("Cerrar sesión", Btn::Secondary, true, px(140))) {
+            app.accounts->sign_out();
+            app.account_alias[0] = '\0';
+            app.account_email[0] = '\0';
+        }
+    } else {
+        ImGui::SetNextItemWidth(px(290));
+        ImGui::InputTextWithHint("##email", "Correo electrónico", app.account_email, sizeof app.account_email);
+        if (app.account_recovery) {
+            ImGui::SetCursorPosX(px(22));
+            if (button("Enviar código", Btn::Secondary, app.account_email[0], px(150))) app.accounts->request_recovery(app.account_email);
+            ImGui::SetCursorPosX(px(22));
+            ImGui::SetNextItemWidth(px(290));
+            ImGui::InputTextWithHint("##code", "Código de seis dígitos", app.account_code, sizeof app.account_code, ImGuiInputTextFlags_CharsDecimal);
+        }
+        ImGui::SetCursorPosX(px(22));
+        ImGui::SetNextItemWidth(px(290));
+        ImGui::InputTextWithHint("##password", app.account_recovery ? "Nueva contraseña" : "Contraseña",
+                                 app.account_password, sizeof app.account_password, ImGuiInputTextFlags_Password);
+        ImGui::SetCursorPosX(px(22));
+        const bool filled = app.account_email[0] && app.account_password[0];
+        if (app.account_recovery) {
+            if (button("Cambiar contraseña", Btn::Primary, filled && std::strlen(app.account_code) == 6, px(180))) {
+                app.accounts->reset_password(app.account_email, app.account_code, app.account_password);
+                SecureZeroMemory(app.account_code, sizeof app.account_code);
+                SecureZeroMemory(app.account_password, sizeof app.account_password);
+            }
+        } else {
+            const bool sign_in = button("Iniciar sesión", Btn::Primary, filled, px(140));
+            ImGui::SameLine();
+            const bool sign_up = button("Crear cuenta", Btn::Secondary, filled, px(140));
+            if (sign_in || sign_up) {
+                app.accounts->sign_in(app.account_email, app.account_password, sign_up);
+                SecureZeroMemory(app.account_password, sizeof app.account_password);
+            }
+        }
+        ImGui::SetCursorPosX(px(22));
+        if (button(app.account_recovery ? "Volver al inicio de sesión" : "Recuperar acceso", Btn::Ghost, true, px(215))) {
+            app.account_recovery = !app.account_recovery;
+            SecureZeroMemory(app.account_password, sizeof app.account_password);
+            SecureZeroMemory(app.account_code, sizeof app.account_code);
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+}
+
 // Ajustes del launcher: versión, canal, comprobar, novedades, progreso y errores.
 void launcher_page(App& app, float width) {
     float x0 = ImGui::GetCursorPosX();
@@ -773,6 +866,9 @@ void launcher_page(App& app, float width) {
     text(g_semibold, 30, P.text, "Ajustes del launcher");
     ImGui::SetCursorPosX(x0);
     text(g_regular, 13.5f, P.dim, "Las actualizaciones solo cambian el launcher. Tus juegos, partidas, salas y ajustes no se tocan, y nada se instala sin tu permiso.", width);
+    ImGui::Dummy(ImVec2(0, px(10)));
+    ImGui::SetCursorPosX(x0);
+    if (button("Cuenta", Btn::Secondary, true, px(120))) app.page = Page::Account;
     ImGui::Dummy(ImVec2(0, px(10)));
     if (!app.update_notice.empty()) {
         ImGui::SetCursorPosX(x0);
@@ -1908,7 +2004,7 @@ int main(int argc, char** argv) {
     int select = -1;
     bool host_now = false, mods_now = false;
     std::string post_update_journal, update_failed;
-    bool auto_update = false, open_settings = false;
+    bool auto_update = false, open_settings = false, open_account = false;
     // Modo aplicador: esta copia del exe sustituye los archivos del launcher y no abre ventana.
     if (argc > 1 && !std::strcmp(argv[1], "--apply-update")) {
         upd::ApplyArgs a;
@@ -1934,6 +2030,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--host")) host_now = true;
         else if (!std::strcmp(argv[i], "--mods")) mods_now = true;  // abre la página de Mods del juego elegido (pruebas y capturas)
         else if (!std::strcmp(argv[i], "--launcher-settings")) open_settings = true;  // abre Ajustes del launcher (pruebas y capturas)  // abre la sala del juego elegido (pruebas)
+        else if (!std::strcmp(argv[i], "--account")) open_account = true;
     }
     // Junto al exe hay una carpeta manifests/ en la versión instalable; en desarrollo se usa la del repo.
     if (const char* base = SDL_GetBasePath()) {
@@ -2019,6 +2116,9 @@ int main(int argc, char** argv) {
 
     // Autoactualización: estado, mensajes de una actualización anterior y comprobación en segundo plano.
     app.updates = std::make_unique<UpdateService>(app.prefs, g_base, [] { wake(); });
+    app.accounts = std::make_unique<account::AccountService>(account::Config::from_environment(),
+                                                            local_app_data() / "WiiLauncher" / "accounts",
+                                                            [] { wake(); });
     {
         std::string from = app.prefs.get("update.from_version");
         if (!update_failed.empty()) {
@@ -2040,6 +2140,7 @@ int main(int argc, char** argv) {
         }
         if (!update_failed.empty()) app.prefs.set("update.from_version", "");
         if (open_settings) app.page = Page::Launcher;
+        if (open_account) app.page = Page::Account;
     }
 
     if (host_now && app.games[app.selected]->adapter) {
@@ -2162,7 +2263,13 @@ int main(int argc, char** argv) {
         float width = std::min(ImGui::GetContentRegionAvail().x - px(96.0f), px(860.0f));
         ImGui::Indent(px(48));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, v4(P.card));
-        if (app.games.empty()) {
+        if (app.page != Page::Account) {
+            SecureZeroMemory(app.account_password, sizeof app.account_password);
+            SecureZeroMemory(app.account_code, sizeof app.account_code);
+        }
+        if (app.page == Page::Account) {
+            account_page(app, width);
+        } else if (app.games.empty()) {
             ImGui::SetCursorPosY(px(40));
             text(g_semibold, 20, P.text, "No hay juegos en el catálogo.");
         } else if (app.page == Page::Room && app.room_game >= 0) {
@@ -2210,6 +2317,7 @@ int main(int argc, char** argv) {
         // Mientras alguna comprobación sigue en marcha, otro fotograma cuando termine (wake()).
     }
     if (app.room) app.room->leave();
+    app.accounts.reset();
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
