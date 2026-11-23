@@ -402,6 +402,30 @@ void test_store(const fs::path& tmp) {
         MCHECK(reopened.replace_profile_package(upgrade.name, next.key, a.key, e));
         MCHECK(reopened.set_active_profile("default", e) && reopened.delete_profile(upgrade.name, e) && reopened.uninstall(next.key, e));
     }
+    {
+        const std::string xml = R"(<wiidisc><options><section name="Pack"><option name="Texto" default="1">
+            <choice name="Base"><patch id="base"/></choice><choice name="Alternativa"><patch id="alt"/></choice>
+            </option></section></options><patch id="base"><file disc="/opening.bnr" external="/a.bnr"/></patch>
+            <patch id="alt"><file disc="/opening.bnr" external="/b.bnr"/></patch></wiidisc>)";
+        std::string changed = xml;
+        changed.replace(changed.find("default=\"1\""), 11, "default=\"2\"");
+        write_zip(tmp / "options1.zip", {{"riivolution/r.xml", xml}, {"a.bnr", "A"}, {"b.bnr", "B"}});
+        write_zip(tmp / "options2.zip", {{"riivolution/r.xml", changed}, {"a.bnr", "A"}, {"b.bnr", "B"}});
+        ModMeta options;
+        options.name = "Preferencias";
+        options.version = "1.0";
+        InstalledMod v1, v2;
+        MCHECK(store.install(tmp / "options1.zip", options, v1, e));
+        options.version = "2.0";
+        MCHECK(store.install(tmp / "options2.zip", options, v2, e));
+        Profile p;
+        p.name = "implicit";
+        p.mods = {{v1.id(), v1.key, true, {}}};
+        MCHECK(store.save_profile(p, e) && store.set_active_profile(p.name, e) &&
+               store.replace_profile_package(p.name, v1.key, v2.key, e));
+        MCHECK(store.load_profile(p.name, p, e) && p.mods.size() == 1 && p.mods[0].choices["Pack/Texto"] == 1);
+        MCHECK(store.delete_profile(p.name, e) && store.uninstall(v1.key, e) && store.uninstall(v2.key, e));
+    }
     // Cancelación a mitad: no queda nada a medias (B14/D10)
     ModMeta mc;
     mc.name = "Mod C";
@@ -427,7 +451,8 @@ void test_store(const fs::path& tmp) {
         MCHECK(needed.problems.empty() && store.verify_profile(needs_base, needed.fingerprint, e));
         SessionManifest parsed;
         const auto manifest = build_session_manifest(store, needs_base, "test", 1, "123abc");
-        MCHECK(parse_session_manifest(manifest.dump(), parsed, e) && parsed.mods[0].dependencies[0].id == a.id());
+        MCHECK(parse_session_manifest(manifest.dump(), parsed, e) && parsed.mods.size() == 2 &&
+               parsed.mods[0].dependencies.size() == 1 && parsed.mods[0].dependencies[0].id == a.id());
         MCHECK(!diff_session(store, needs_base, parsed, "456def").game_ok);
         MCHECK(diff_session(store, needs_base, parsed, "123abc").compatible);
         MCHECK(store.uninstall(c.key, e));
@@ -886,7 +911,8 @@ void test_mods_service_update(const fs::path& tmp) {
         service.download_file(7, 71);
         snapshot = idle();
         MCHECK(!snapshot.has_preview && !snapshot.error.empty() && snapshot.installed.size() == 1);
-        MCHECK(store.load_profile("default", profile, error) && profile.mods[0].package == prior.key && !profile.mods[0].enabled);
+        MCHECK(store.load_profile("default", profile, error) && profile.mods.size() == 1 &&
+               profile.mods[0].package == prior.key && !profile.mods[0].enabled);
 
         mock.ok(download, zip);
         service.clear_messages();
@@ -896,7 +922,8 @@ void test_mods_service_update(const fs::path& tmp) {
         service.install_preview("", "", false);
         snapshot = idle();
         MCHECK(snapshot.error.empty() && snapshot.installed.size() == 2);
-        MCHECK(store.load_profile("default", profile, error) && profile.mods[0].package != prior.key && !profile.mods[0].enabled);
+        MCHECK(store.load_profile("default", profile, error) && profile.mods.size() == 1 &&
+               profile.mods[0].package != prior.key && !profile.mods[0].enabled);
         MCHECK(store.verify(prior, error));
     }
     _putenv_s("WL_LOCALAPPDATA", saved.c_str());

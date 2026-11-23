@@ -507,25 +507,24 @@ bool ModStore::replace_profile_package(const std::string& name, const std::strin
         error = "la versión nueva no corresponde al mod del perfil";
         return false;
     }
-    auto option = [](const InstalledMod& mod, const std::string& id) -> const Json* {
-        for (const auto& opt : mod.json["options"].elements())
-            if (opt["id"].str() == id) return &opt;
-        return nullptr;
-    };
-    for (const auto& [id, choice] : entry->choices) {
-        const Json* old_option = option(before, id);
-        // Los perfiles antiguos pueden guardar opciones de una versión anterior del mismo mod.
-        if (!old_option) continue;
-        const Json* new_option = option(after, id);
-        if (!new_option || choice < 0 || (choice > 0 &&
-            (static_cast<size_t>(choice) > (*old_option)["choices"].size() ||
+    if (old_key == new_key) return true;
+    for (const auto& old_option : before.json["options"].elements()) {
+        const auto id = old_option["id"].str();
+        const auto saved = entry->choices.find(id);
+        const auto choice = saved == entry->choices.end() ? old_option["default"].num() : saved->second;
+        const auto& new_options = after.json["options"].elements();
+        const auto new_option = std::find_if(new_options.begin(), new_options.end(),
+            [&](const Json& option) { return option["id"].str() == id; });
+        if (choice == 0 && new_option == new_options.end()) continue;
+        if (new_option == new_options.end() || choice < 0 || (choice > 0 &&
+            (static_cast<size_t>(choice) > old_option["choices"].size() ||
              static_cast<size_t>(choice) > (*new_option)["choices"].size() ||
-             (*old_option)["choices"][choice - 1]["name"].str() != (*new_option)["choices"][choice - 1]["name"].str()))) {
+             old_option["choices"][choice - 1]["name"].str() != (*new_option)["choices"][choice - 1]["name"].str()))) {
             error = "la versión nueva cambió la opción de Riivolution «" + id + "»";
             return false;
         }
+        if ((*new_option)["default"].num() != choice) entry->choices[id] = static_cast<int>(choice);
     }
-    if (old_key == new_key) return true;
     entry->package = new_key;
     auto effective = compute(profile);
     if (!effective.problems.empty()) { error = effective.problems.front(); return false; }
