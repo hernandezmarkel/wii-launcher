@@ -61,6 +61,7 @@ private:
         int id = 0;
         std::string in;
         std::string out;
+        bool connecting = false;
         bool greeted = false;
     };
 

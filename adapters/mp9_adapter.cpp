@@ -16,12 +16,12 @@ public:
     std::string compat_token(const InstallStatus& s) const override { return s.revision + "/" + s.disc_id; }
 
     std::optional<LaunchSpec> online(const fs::path& root, const SessionStart& st) const override {
-        if (st.seat < 0 || st.seats == 0 || st.host.empty() || st.port == 0) return std::nullopt;
+        if (st.session == 0 || st.seat < 0 || st.seats == 0 || st.port == 0) return std::nullopt;
         LaunchSpec spec = offline(root);
         spec.env["WP_NET_SESSION"] = std::to_string(st.session);
         spec.env["WP_NET_SEAT"] = std::to_string(st.seat);
         spec.env["WP_NET_SEATS"] = std::to_string(st.seats);
-        spec.env["WP_NET_HOST"] = st.host;
+        spec.env["WP_NET_HOST"] = st.host;  // Vacío en el PC que hospeda la partida.
         spec.env["WP_NET_PORT"] = std::to_string(st.port);
         spec.env["WP_NET_EPOCH"] = std::to_string(st.epoch);
         spec.env["WP_NET_DELAY"] = std::to_string(st.delay);
@@ -32,7 +32,7 @@ public:
     std::unique_ptr<RoomSession> make_room() const override;
 };
 
-// Envuelve online::Room (copia literal del launcher de MP9) en el contrato común.
+// Envuelve la sala del launcher de MP9 en el contrato común.
 class Mp9Room final : public RoomSession {
 public:
     bool host(uint16_t port, const std::string& name, const std::string& token, std::string& error) override {
@@ -65,9 +65,7 @@ public:
         out.delay = info.delay;
         out.min_delay = info.min_delay;
         if (hosting) {
-            // El launcher original cierra la sala del anfitrión justo al empezar. Si el START y el cierre
-            // llegan juntos al invitado, su poll() ve el cierre antes de leer el START y se queda fuera
-            // (reproducido en tests por loopback). Aquí el anfitrión mantiene la sala 2 s más; el protocolo no cambia.
+            // Da tiempo a los invitados con launchers anteriores a leer START antes del cierre.
             closing_ = true;
             close_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         } else {
@@ -82,7 +80,6 @@ public:
     void start(int option) override { room_.start(option <= 0 ? 2 : option == 1 ? 3 : 5); }
     std::vector<std::string> start_options() const override { return {"Cable, poco ping", "Normal", "WiFi inestable"}; }
     RoomMode mode() const override {
-        if (closing_) return RoomMode::Idle;
         switch (room_.mode()) {
         case online::Mode::Hosting: return RoomMode::Hosting;
         case online::Mode::Joining: return RoomMode::Joining;

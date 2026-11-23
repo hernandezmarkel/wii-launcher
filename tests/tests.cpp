@@ -199,6 +199,8 @@ int main() {
         bool gx = false;
         pump(*host, *stranger, sh, sx, gh, gx, 300);
         CHECK(stranger->mode() == RoomMode::Idle);  // rechazado por versión
+        CHECK(stranger->status().find("different version") != std::string::npos ||
+              stranger->status().find("otra versión") != std::string::npos);
         CHECK(host->members().size() == 2);
         guest->choose_seat(1);
         pump(*host, *guest, sh, sg, gh, gg, 200);
@@ -206,6 +208,9 @@ int main() {
         pump(*host, *guest, sh, sg, gh, gg, 200);
         CHECK(host->can_start());
         host->start(1);
+        gh = host->poll(sh);
+        CHECK(host->mode() == RoomMode::Hosting);  // debe seguir atendiendo el cierre de la sala
+        host->leave();  // el launcher original puede cerrar antes de que el invitado lea START
         pump(*host, *guest, sh, sg, gh, gg, 400);
         CHECK(gh && gg);
         CHECK(sh.session == sg.session && sh.session != 0);
@@ -213,6 +218,8 @@ int main() {
         CHECK(sh.seat == 0 && sg.seat == 1);
         CHECK(sh.min_delay == 3 && sg.min_delay == 3);
         CHECK(sh.host.empty() && sg.host == "127.0.0.1");
+        auto host_spec = a->online(inst, sh);
+        CHECK(host_spec && host_spec->env.at("WP_NET_HOST").empty() && host_spec->env.at("WP_NET_SEAT") == "0");
         auto spec = a->online(inst, sg);
         CHECK(spec && spec->env.at("WP_NET_SEATS") == "3" && spec->env.at("WP_NET_SEAT") == "1");
     }

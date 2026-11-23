@@ -164,6 +164,7 @@ bool Room::join(const std::string& address, uint16_t port, const std::string& na
     }
     Peer peer;
     peer.socket = static_cast<intptr_t>(s);
+    peer.connecting = result != 0;
     peers_.push_back(peer);
     mode_ = Mode::Joining;
     address_ = address;
@@ -190,6 +191,7 @@ void Room::leave() {
     }
     members_.clear();
     mode_ = Mode::Idle;
+    host_start_ready_ = false;
     status_.clear();
 }
 
@@ -228,6 +230,27 @@ Member* Room::member(int id) {
 // Sends what is queued and reads what arrived; false when the connection is gone.
 bool Room::pump(Peer& peer) {
     socket_t s = as_socket(peer.socket);
+    if (peer.connecting) {
+        fd_set writable;
+        fd_set failed;
+        FD_ZERO(&writable);
+        FD_ZERO(&failed);
+        FD_SET(s, &writable);
+        FD_SET(s, &failed);
+        timeval nowait{};
+#ifdef _WIN32
+        int ready = select(0, nullptr, &writable, &failed, &nowait);
+#else
+        int ready = select(s + 1, nullptr, &writable, &failed, &nowait);
+#endif
+        if (ready == 0) return true;
+        int error = 0;
+        socklen_t length = sizeof error;
+        if (ready < 0 || getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length) != 0 || error != 0) {
+            return false;
+        }
+        peer.connecting = false;
+    }
     while (!peer.out.empty()) {
         int sent = send(s, peer.out.data(), static_cast<int>(peer.out.size()), 0);
         if (sent > 0) {
@@ -395,10 +418,13 @@ bool Room::poll(StartInfo& start) {
         }
     }
     for (size_t i = 0; i < peers_.size();) {
-        if (!pump(peers_[i])) {
-            drop(i, say("The connection to the room was lost.", "Se ha perdido la conexión con la sala."));
+        const bool connected = pump(peers_[i]);
+        const char* lost = say("The connection to the room was lost.", "Se ha perdido la conexión con la sala.");
+        if (!connected && mode_ == Mode::Hosting) {
+            drop(i, lost);
             continue;
         }
+        // REJECT y START pueden llegar junto al cierre del anfitrión.
         bool removed = false;
         size_t end;
         while (!removed && (end = peers_[i].in.find('\n')) != std::string::npos) {
@@ -421,7 +447,8 @@ bool Room::poll(StartInfo& start) {
             }
         }
         if (!removed) {
-            i++;
+            if (connected) i++;
+            else drop(i, lost);
         }
     }
     return false;
@@ -446,7 +473,7 @@ void Room::set_ready(bool ready) {
 }
 
 bool Room::can_start() const {
-    if (mode_ != Mode::Hosting) {
+    if (mode_ != Mode::Hosting || started_) {
         return false;
     }
     uint32_t used = 0;

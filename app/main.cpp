@@ -2072,7 +2072,7 @@ int main(int argc, char** argv) {
                 Game& g = *app.games[app.room_game];
                 auto spec = g.adapter->online(g.root, start);
                 if (spec) launch_modded(g, *spec, app.room_fingerprint);
-                else app.room_error = "La sala empezó pero este PC no tiene puesto: no se abre el juego.";
+                else set_message(g, "No se pudo abrir el juego con los datos de la sala.", true);
                 app.page = Page::Game;
             }
             redraw = std::max(redraw, 1);
