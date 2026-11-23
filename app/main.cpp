@@ -1133,6 +1133,10 @@ void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
         return;
     }
     if (!m.catalog_loaded && app.gb_requested != app.mods_game) { app.mods->browse(1, ""); app.gb_requested = app.mods_game; }
+    auto installed = [&](int64_t id) {
+        const std::string key = "gamebanana." + std::to_string(id);
+        return std::any_of(m.installed.begin(), m.installed.end(), [&](const mods::InstalledMod& mod) { return mod.id() == key; });
+    };
     if (m.has_detail) {
         const mods::CatalogDetail& d = m.detail;
         ImGui::SetCursorPosX(x0);
@@ -1140,7 +1144,9 @@ void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
         ImGui::SetCursorPos(ImVec2(px(22), px(18)));
         text(g_semibold, 17, P.text, d.item.name.c_str(), width - px(44));
         ImGui::SetCursorPosX(px(22));
-        text(g_regular, 13, P.dim, ("de " + d.item.author + " · " + d.item.category + (d.item.version.empty() ? "" : " · versión " + d.item.version)).c_str(), width - px(44));
+        text(g_regular, 13, P.dim, ("de " + d.item.author + " · " + d.item.category +
+            (d.item.version.empty() ? "" : " · versión " + d.item.version) +
+            (installed(d.item.id) ? " · Instalado" : "")).c_str(), width - px(44));
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 12.5f, P.faint, ("Licencia: " + (d.license.empty() ? std::string("no indicada") : d.license)).c_str(), width - px(44));
         if (!d.description.empty()) {
@@ -1209,7 +1215,7 @@ void mods_explore_tab(App& app, const ModsSnapshot& m, float x0, float width) {
         ImGui::SameLine(px(32));
         ImGui::BeginGroup();
         text(g_semibold, 14, P.text, it.name.c_str());
-        text(g_regular, 12, P.faint, (it.category + " · " + it.author).c_str());
+        text(g_regular, 12, P.faint, (it.category + " · " + it.author + (installed(it.id) ? " · Instalado" : "")).c_str());
         ImGui::EndGroup();
         ImGui::PopID();
     }
