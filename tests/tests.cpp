@@ -224,6 +224,38 @@ int main() {
         CHECK(spec && spec->env.at("WP_NET_SEATS") == "3" && spec->env.at("WP_NET_SEAT") == "1");
     }
 
+    // Si se corta la primera conexión antes de WELCOME, se retoma sin volver a pulsar Unirse.
+    {
+        using namespace std::chrono_literals;
+        auto host = a->make_room();
+        auto guest = a->make_room();
+        std::string err;
+        constexpr uint16_t port = 47715;
+        CHECK(host->host(port, "Ana", "d755eb8/SSQE01", err));
+        CHECK(guest->join("127.0.0.1", port, "Beñat", "d755eb8/SSQE01", err));
+        SessionStart start;
+        const auto pending_until = std::chrono::steady_clock::now() + 100ms;
+        while (std::chrono::steady_clock::now() < pending_until) {
+            guest->poll(start);  // El anfitrión todavía no lee HELLO ni envía WELCOME.
+            std::this_thread::sleep_for(5ms);
+        }
+        host->leave();
+        const auto unavailable_until = std::chrono::steady_clock::now() + 150ms;
+        while (std::chrono::steady_clock::now() < unavailable_until) {
+            guest->poll(start);
+            std::this_thread::sleep_for(5ms);
+        }
+        CHECK(guest->mode() == RoomMode::Joining);
+        CHECK(host->host(port, "Ana", "d755eb8/SSQE01", err));
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (guest->mode() == RoomMode::Joining && std::chrono::steady_clock::now() < deadline) {
+            host->poll(start);
+            guest->poll(start);
+            std::this_thread::sleep_for(5ms);
+        }
+        CHECK(guest->mode() == RoomMode::Joined && host->members().size() == 2);
+    }
+
     // 12b. Sala de Wii Party (lobby.cpp original) por loopback, y su compat_token
     {
         fs::path wpi = lad / "WiiPartyOnline";

@@ -60,6 +60,11 @@ namespace online {
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
+constexpr auto kJoinTimeout = std::chrono::seconds(4);
+constexpr auto kJoinRetryDelay = std::chrono::milliseconds(500);
+constexpr int kJoinRetries = 2;
+
 bool spanish() {
     return language_is("es");
 }
@@ -138,12 +143,25 @@ bool Room::host(uint16_t port, const std::string& name, const std::string& versi
 bool Room::join(const std::string& address, uint16_t port, const std::string& name, const std::string& version, std::string& error) {
     leave();
     start_sockets();
+    address_ = address;
+    port_ = port;
+    version_ = version;
+    name_ = clean_name(name);
+    started_ = false;
+    if (!connect_to_host(error)) return false;
+    mode_ = Mode::Joining;
+    join_retries_ = kJoinRetries;
+    status_ = say("Connecting to the host...", "Conectando con el anfitrión…");
+    return true;
+}
+
+bool Room::connect_to_host(std::string& error) {
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* found = nullptr;
-    std::string port_text = std::to_string(port);
-    if (getaddrinfo(address.c_str(), port_text.c_str(), &hints, &found) != 0 || !found) {
+    std::string port_text = std::to_string(port_);
+    if (getaddrinfo(address_.c_str(), port_text.c_str(), &hints, &found) != 0 || !found) {
         error = say("That address is not valid.", "Esa dirección no es válida.");
         return false;
     }
@@ -156,26 +174,35 @@ bool Room::join(const std::string& address, uint16_t port, const std::string& na
     set_nonblocking(s);
     no_delay(s);
     int result = connect(s, found->ai_addr, static_cast<int>(found->ai_addrlen));
+    const bool pending = result != 0 && would_block();
     freeaddrinfo(found);
-    if (result != 0 && !would_block()) {
+    if (result != 0 && !pending) {
         close_socket(s);
         error = say("Could not reach that address.", "No se pudo conectar con esa dirección.");
         return false;
     }
     Peer peer;
     peer.socket = static_cast<intptr_t>(s);
-    peer.connecting = result != 0;
-    peers_.push_back(peer);
-    mode_ = Mode::Joining;
-    address_ = address;
-    port_ = port;
-    version_ = version;
-    name_ = clean_name(name);
-    started_ = false;
-    members_.clear();
-    send_line(peers_[0], "HELLO " + version_ + "\t" + name_);
-    status_ = say("Connecting...", "Conectando...");
+    peer.connecting = pending;
+    peer.out = "HELLO " + version_ + "\t" + name_ + '\n';
+    peers_.push_back(std::move(peer));
+    join_deadline_ = Clock::now() + kJoinTimeout;
     return true;
+}
+
+void Room::retry_join(const char* error) {
+    if (!peers_.empty()) {
+        close_socket(as_socket(peers_.front().socket));
+        peers_.clear();
+    }
+    if (join_retries_ == 0) {
+        mode_ = Mode::Idle;
+        status_ = error;
+        return;
+    }
+    --join_retries_;
+    join_deadline_ = Clock::now() + kJoinRetryDelay;
+    status_ = say("Retrying the connection to the host...", "Reintentando la conexión con el anfitrión…");
 }
 
 void Room::leave() {
@@ -402,6 +429,14 @@ bool Room::poll(StartInfo& start) {
     if (mode_ == Mode::Idle) {
         return false;
     }
+    if (mode_ == Mode::Joining && peers_.empty()) {
+        if (Clock::now() < join_deadline_) return false;
+        std::string error;
+        if (!connect_to_host(error)) {
+            retry_join(error.c_str());
+            return false;
+        }
+    }
     if (mode_ == Mode::Hosting) {
         while (true) {
             sockaddr_in from{};
@@ -447,6 +482,11 @@ bool Room::poll(StartInfo& start) {
             }
         }
         if (!removed) {
+            if (mode_ == Mode::Joining && (!connected || Clock::now() >= join_deadline_)) {
+                retry_join(say("Could not join the room. Check that it is open and that the address and port are correct.",
+                               "No se pudo entrar en la sala. Comprueba que sigue abierta y que la dirección y el puerto son correctos."));
+                return false;
+            }
             if (connected) i++;
             else drop(i, lost);
         }
