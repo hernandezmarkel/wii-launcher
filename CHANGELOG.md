@@ -6,6 +6,12 @@ solo una etiqueta `vX.Y.Z` aprobada publica algo.
 
 ## [Sin publicar]
 
+## [1.0.0-beta.7] - 2026-11-23
+
+- Mario Party 9 abre el juego para el anfitrión al pulsar «Empezar» desde la sala, con o sin mods.
+- Un solo clic en «Unirse» deja la solicitud en cola mientras se comprueban los mods. En Mario Party 9 el launcher reintenta automáticamente los cortes antes de entrar.
+- Mario Party 9 conserva la orden de inicio y los motivos de rechazo aunque lleguen justo antes de que se cierre la conexión.
+
 ## [1.0.0-beta.6] - 2026-11-23
 
 - Mario Party 9 admite mods de datos mediante archivos de reemplazo y paquetes Riivolution de solo archivos. Puedes importarlos como ZIP o carpeta y gestionarlos con perfiles.
