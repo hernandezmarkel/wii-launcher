@@ -49,9 +49,11 @@ public:
                           const std::function<bool(uint64_t, uint64_t)>& progress = {}) = 0;
 };
 
-struct SessionMod;
+struct ModReference;
 struct ModMeta;
-const CatalogFile* resolve_catalog_file(const CatalogDetail& detail, const SessionMod& wanted);
+struct InstalledMod;
+const CatalogFile* resolve_catalog_file(const CatalogDetail& detail, const ModReference& wanted);
 ModMeta catalog_meta(const std::string& provider, const CatalogDetail& detail, const CatalogFile& file);
+bool is_catalog_update(const CatalogDetail& detail, const CatalogFile& file, const InstalledMod& installed);
 
 }  // namespace wl::mods

@@ -127,6 +127,18 @@ std::vector<uint8_t> read_bytes(const fs::path& p) {
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
 }
 
+void link_or_copy(const fs::path& from, const fs::path& to, std::error_code& error) {
+    fs::create_hard_link(from, to, error);
+    if (!error) return;
+    bool unsupported = error == std::errc::cross_device_link || error == std::errc::operation_not_supported;
+#ifdef _WIN32
+    if (error.category() == std::system_category())
+        unsupported = unsupported || error.value() == ERROR_NOT_SAME_DEVICE || error.value() == ERROR_NOT_SUPPORTED ||
+            error.value() == ERROR_INVALID_FUNCTION;
+#endif
+    if (unsupported) fs::copy_file(from, to, fs::copy_options::none, error);
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------ perfiles
@@ -253,6 +265,8 @@ bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod
         files.set(s, f);
         content.set(s, sha);
     }
+    const Json dependencies = serialize_dependencies(plan.dependencies);
+    if (!plan.dependencies.empty()) content.set("wii-launcher-mod.json", sha256_hex(dependencies.dump()));
     std::string content_sha = sha256_hex(content.dump());
     std::string package_sha = fs::is_directory(source, ec) ? content_sha : sha256_file_hex(source);
     if (package_sha.empty() || (!expected.package_sha256.empty() && package_sha != expected.package_sha256) ||
@@ -267,9 +281,15 @@ bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod
     std::string id = meta.id;
     if (id.empty()) id = meta.provider + "." + slug(meta.name.empty() ? to_utf8(source.stem()) : meta.name);
     std::string id_norm, why;
-    if (id.size() > 80 || !normalize_relative(id, id_norm, why) || id_norm != id || id.find('/') != std::string::npos) {
+    if (!valid_mod_id(id) || !normalize_relative(id, id_norm, why) || id_norm != id || id.find('/') != std::string::npos) {
         cleanup();
         error = "identificador de mod no válido";
+        return false;
+    }
+    if (std::any_of(plan.dependencies.begin(), plan.dependencies.end(),
+                    [&](const ModDependency& dependency) { return dependency.id == id; })) {
+        cleanup();
+        error = "el mod se declara como dependencia de sí mismo";
         return false;
     }
     mod.set("schema", 1);
@@ -284,6 +304,7 @@ bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod
     mod.set("author", meta.author);
     mod.set("source_file_id", meta.source_file_id);
     mod.set("source_md5", meta.source_md5);
+    mod.set("source_added", meta.source_added);
     mod.set("package_sha256", package_sha);
     mod.set("content_sha256", content_sha);
     mod.set("format", format_name(plan.format));
@@ -292,6 +313,7 @@ bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod
     mod.set("base_content_id", base_.base_content_id);
     mod.set("installed_at", iso_now());
     mod.set("files", files);
+    mod.set("dependencies", dependencies);
     Json patches = Json::object();
     for (const auto& [pid, ops] : plan.patches) {
         Json arr = Json::array();
@@ -333,16 +355,26 @@ bool ModStore::install(const fs::path& source, const ModMeta& meta, InstalledMod
     if (!write_file_atomic(stage / "mod.json", mod.pretty(), error)) { cleanup(); return false; }
     std::string key = sha256_hex(id + "\n" + mod["version"].str() + "\n" + content_sha).substr(0, 32);
     fs::path final_dir = root_ / "packages" / key;
-    if (fs::exists(final_dir / "mod.json")) {
-        cleanup();   // ya instalado idéntico: no se duplica (B11)
-        if (find_installed(key, out)) return verify(out, error);
-        error = "la copia instalada del paquete no se puede leer";
-        return false;
-    } else {
-        fs::remove_all(final_dir, ec);
-        fs::rename(stage, final_dir, ec);
-        if (ec) { cleanup(); error = "no se puede completar la instalación"; return false; }
+    if (fs::exists(final_dir, ec)) {
+        std::string check;
+        if (find_installed(key, out) && out.json["base_content_id"].str() == base_.base_content_id && verify(out, check)) {
+            cleanup();
+            return true;
+        }
+        for (const auto& candidate : installed()) {
+            if (candidate.id() == id && candidate.version() == mod["version"].str() && candidate.content_sha() == content_sha &&
+                candidate.json["base_content_id"].str() == base_.base_content_id && verify(candidate, check)) {
+                out = candidate;
+                cleanup();
+                return true;
+            }
+        }
+        // Una referencia previa puede seguir usándose en otro perfil. La reparación se instala al lado.
+        key = sha256_hex(key + "\n" + op_id()).substr(0, 32);
+        final_dir = root_ / "packages" / key;
     }
+    fs::rename(stage, final_dir, ec);
+    if (ec) { cleanup(); error = "no se puede completar la instalación"; return false; }
     if (progress) progress("", plan.payload_bytes, plan.payload_bytes);
     return find_installed(key, out) ? true : (error = "instalación incompleta", false);
 }
@@ -370,12 +402,33 @@ std::vector<InstalledMod> ModStore::installed() const {
 }
 
 bool ModStore::verify(const InstalledMod& mod, std::string& error) const {
+    Json content = Json::object();
     for (const auto& [src, info] : mod.json["files"].items()) {
         fs::path p = join_inside(root_ / "packages" / mod.key / "content", src);
         if (p.empty() || sha256_file_hex(p) != info["sha256"].str()) {
             error = "el archivo " + src + " de «" + mod.name() + "» falta o ha cambiado";
             return false;
         }
+        content.set(src, info["sha256"]);
+    }
+    if (mod.json["dependencies"].size() > 0)
+        content.set("wii-launcher-mod.json", sha256_hex(mod.json["dependencies"].dump()));
+    if (content.size() == 0 || sha256_hex(content.dump()) != mod.content_sha()) {
+        error = "los metadatos de «" + mod.name() + "» no coinciden con su huella";
+        return false;
+    }
+    return true;
+}
+
+bool ModStore::verify_profile(const Profile& profile, const std::string& fingerprint, std::string& error) const {
+    const auto current = compute(profile);
+    if (!current.problems.empty()) { error = current.problems.front(); return false; }
+    if (current.fingerprint != fingerprint) { error = "el perfil de mods cambió desde que se acordó la partida"; return false; }
+    for (const auto& entry : profile.mods) {
+        if (!entry.enabled) continue;
+        InstalledMod mod;
+        if (!find_installed(entry.package, mod)) { error = "falta «" + entry.id + "»"; return false; }
+        if (!verify(mod, error)) return false;
     }
     return true;
 }
@@ -387,7 +440,7 @@ bool ModStore::uninstall(const std::string& key, std::string& error) {
     for (const auto& name : profiles()) {
         Profile p;
         std::string e;
-        if (!load_profile(name, p, e)) continue;
+        if (!load_profile(name, p, e)) { error = "no se pudo comprobar el perfil «" + name + "»: " + e; return false; }
         for (const auto& m : p.mods)
             if (m.package == key) { error = "lo usa el perfil «" + name + "»: quítalo de ese perfil primero"; return false; }
     }
@@ -434,6 +487,50 @@ bool ModStore::save_profile(Profile profile, std::string& error) {
     if (load_profile(profile.name, old, e)) profile.epoch = std::max(profile.epoch, old.epoch) + 1;
     else profile.epoch += 1;
     return write_file_atomic(root_ / "profiles" / (profile.name + ".json"), profile.to_json().pretty(), error);
+}
+
+bool ModStore::replace_profile_package(const std::string& name, const std::string& old_key,
+                                       const std::string& new_key, std::string& error) {
+    StoreLock lock(root_ / "locks" / "store.lock");
+    if (!lock.held()) { error = "hay otra operación de mods en curso"; return false; }
+    Profile profile;
+    if (!load_profile(name, profile, error)) return false;
+    auto entry = std::find_if(profile.mods.begin(), profile.mods.end(),
+                              [&](const ProfileEntry& mod) { return mod.package == old_key; });
+    if (entry == profile.mods.end() || active_profile() != name || name == "session") {
+        error = "el perfil cambió durante la descarga";
+        return false;
+    }
+    InstalledMod before, after;
+    if (!find_installed(old_key, before) || !find_installed(new_key, after) || before.id() != entry->id ||
+        after.id() != entry->id || after.json["base_content_id"].str() != base_.base_content_id) {
+        error = "la versión nueva no corresponde al mod del perfil";
+        return false;
+    }
+    auto option = [](const InstalledMod& mod, const std::string& id) -> const Json* {
+        for (const auto& opt : mod.json["options"].elements())
+            if (opt["id"].str() == id) return &opt;
+        return nullptr;
+    };
+    for (const auto& [id, choice] : entry->choices) {
+        const Json* old_option = option(before, id);
+        // Los perfiles antiguos pueden guardar opciones de una versión anterior del mismo mod.
+        if (!old_option) continue;
+        const Json* new_option = option(after, id);
+        if (!new_option || choice < 0 || (choice > 0 &&
+            (static_cast<size_t>(choice) > (*old_option)["choices"].size() ||
+             static_cast<size_t>(choice) > (*new_option)["choices"].size() ||
+             (*old_option)["choices"][choice - 1]["name"].str() != (*new_option)["choices"][choice - 1]["name"].str()))) {
+            error = "la versión nueva cambió la opción de Riivolution «" + id + "»";
+            return false;
+        }
+    }
+    if (old_key == new_key) return true;
+    entry->package = new_key;
+    auto effective = compute(profile);
+    if (!effective.problems.empty()) { error = effective.problems.front(); return false; }
+    ++profile.epoch;
+    return write_file_atomic(root_ / "profiles" / (name + ".json"), profile.to_json().pretty(), error);
 }
 
 bool ModStore::delete_profile(const std::string& name, std::string& error) {
@@ -484,6 +581,8 @@ Effective ModStore::compute(const Profile& profile) const {
     Effective eff;
     std::map<std::string, size_t> where;   // fold_key(disc) -> índice en eff.files
     int order = 0;
+    std::map<std::string, std::string> enabled;
+    std::vector<std::pair<std::string, ModDependency>> requirements;
     for (const auto& entry : profile.mods) {
         if (!entry.enabled) continue;
         InstalledMod mod;
@@ -495,6 +594,14 @@ Effective ModStore::compute(const Profile& profile) const {
             eff.problems.push_back("«" + mod.name() + "» se instaló para otro disco base: vuelve a instalarlo");
             continue;
         }
+        std::vector<ModDependency> dependencies;
+        std::string error;
+        if (!parse_dependencies(mod.json["dependencies"], dependencies, error)) {
+            eff.problems.push_back("«" + mod.name() + "»: " + error);
+            continue;
+        }
+        enabled.emplace(mod.id(), mod.version());
+        for (const auto& dep : dependencies) requirements.emplace_back(mod.name(), dep);
         Json choices = Json::object();
         for (const auto& [k, v] : entry.choices) choices.set(k, v);
         for (const auto& op : effective_ops(mod.json, entry.choices)) {
@@ -530,6 +637,11 @@ Effective ModStore::compute(const Profile& profile) const {
         m.set("config_sha256", sha256_hex(choices.dump()));
         m.set("required_for_online", true);   // política estricta: todo mod activo cuenta
         eff.manifest_mods.push(m);
+    }
+    for (const auto& [name, dependency] : requirements) {
+        auto required = enabled.find(dependency.id);
+        if (required == enabled.end() || required->second != dependency.version)
+            eff.problems.push_back("«" + name + "» requiere activar " + dependency.id + " " + dependency.version);
     }
     if (eff.files.empty() && eff.manifest_mods.size() == 0) return eff;
     // Fingerprint canónico: identidad de base + loader + mods en orden + bytes que de verdad se aplican.
@@ -589,8 +701,8 @@ bool ModStore::build_vdisc(const Effective& eff, fs::path& out, std::string& err
     for (const char* name : {"boot.bin", "bi2.bin", "apploader.img", "main.dol"}) {
         fs::path from = extracted_ / "sys" / name;
         if (!fs::exists(from)) continue;
-        fs::create_hard_link(from, tmp / "sys" / name, ec);
-        if (ec) return fail("no se pueden crear enlaces duros (¿el juego y los datos del launcher están en discos distintos?)");
+        link_or_copy(from, tmp / "sys" / name, ec);
+        if (ec) return fail("no se puede preparar " + std::string(name) + " en el disco virtual: " + ec.message());
     }
     std::map<uint32_t, uint32_t> sizes;
     std::map<std::string, const EffectiveFile*> overrides;
@@ -617,11 +729,11 @@ bool ModStore::build_vdisc(const Effective& eff, fs::path& out, std::string& err
         fs::create_directories(dest.parent_path(), ec);
         auto it = overrides.find(fold_key(file.path));
         fs::path from = it != overrides.end() ? it->second->source : extracted_ / "files" / from_utf8(file.path);
-        fs::create_hard_link(from, dest, ec);
+        link_or_copy(from, dest, ec);
         if (ec) {
             // Archivo original ausente: el juego tampoco lo leería; se deja sin enlazar.
             if (it == overrides.end() && !fs::exists(from)) { ec.clear(); continue; }
-            return fail("no se pueden crear enlaces duros (¿el juego y los datos del launcher están en discos distintos?)");
+            return fail("no se puede preparar " + file.path + " en el disco virtual: " + ec.message());
         }
     }
     // Revalidación de lo que se aplica de verdad antes de declarar el disco listo.

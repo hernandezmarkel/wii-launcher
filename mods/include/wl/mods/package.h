@@ -67,12 +67,21 @@ struct RiivoOption {
     std::vector<RiivoChoice> choices;
 };
 
+struct ModDependency {
+    std::string id, version;
+};
+
+bool valid_mod_id(const std::string& id);
+Json serialize_dependencies(const std::vector<ModDependency>& dependencies);
+bool parse_dependencies(const Json& json, std::vector<ModDependency>& dependencies, std::string& error);
+
 struct PackagePlan {
     ModFormat format = ModFormat::Unknown;
     std::string region_hint;                       // de <id game> / carpeta SSQE01... si existe
     std::map<std::string, std::vector<DiscOp>> patches;   // id -> operaciones ya resueltas contra la FST
     std::vector<std::string> always;               // parches que se aplican siempre (formato files)
     std::vector<RiivoOption> options;
+    std::vector<ModDependency> dependencies;
     std::vector<std::string> ignored;              // "ruta: motivo" (no existe en tu disco, README...)
     std::vector<std::string> blocking;             // motivos que impiden instalar
     std::vector<std::string> warnings;

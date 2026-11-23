@@ -33,6 +33,7 @@ struct ModMeta {               // lo que se sabe del origen (el usuario o el pro
     std::string id;            // «local.nombre» o «gamebanana.123456»; vacío = se deduce del archivo
     std::string name, version, provider = "local", source_id, source_page, license, author;
     std::string source_file_id, source_md5;   // archivo concreto del proveedor (para detectar actualizaciones)
+    int64_t source_added = 0;
 };
 
 struct InstalledMod {
@@ -114,11 +115,14 @@ public:
     bool uninstall(const std::string& key, std::string& error);
     // Comprueba que los archivos del paquete siguen intactos (hash).
     bool verify(const InstalledMod& mod, std::string& error) const;
+    bool verify_profile(const Profile& profile, const std::string& fingerprint, std::string& error) const;
 
     // Perfiles
     std::vector<std::string> profiles() const;
     bool load_profile(const std::string& name, Profile& out, std::string& error) const;
     bool save_profile(Profile profile, std::string& error);   // sube epoch
+    bool replace_profile_package(const std::string& name, const std::string& old_key,
+                                 const std::string& new_key, std::string& error);
     bool delete_profile(const std::string& name, std::string& error);
     std::string active_profile() const;
     bool set_active_profile(const std::string& name, std::string& error);

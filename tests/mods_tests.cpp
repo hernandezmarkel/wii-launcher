@@ -12,6 +12,7 @@
 
 #include "wl/mods/fst.h"
 #include "wl/mods/gamebanana.h"
+#include "wl/mods/profile_catalog.h"
 #include "wl/mods/json.h"
 #include "wl/mods/lobby_mods.h"
 #include "wl/mods/package.h"
@@ -375,6 +376,27 @@ void test_store(const fs::path& tmp) {
     MCHECK(store.install(tmp / "b.zip", mb, b, e));
     MCHECK(store.installed().size() == 2);
     MCHECK(store.verify(a, e));
+    // Actualiza la referencia del perfil sin moverla ni activar una entrada desactivada.
+    {
+        ModMeta ma_next = ma;
+        ma_next.version = "2.0.0";
+        InstalledMod next;
+        MCHECK(store.install(tmp / "a.zip", ma_next, next, e));
+        Profile upgrade;
+        upgrade.name = "upgrade";
+        upgrade.mods = {{b.id(), b.key, true, {}}, {a.id(), a.key, false, {}}};
+        MCHECK(store.save_profile(upgrade, e) && store.set_active_profile(upgrade.name, e));
+        MCHECK(!store.replace_profile_package(upgrade.name, a.key, b.key, e));
+        MCHECK(store.load_profile(upgrade.name, upgrade, e) && upgrade.mods[1].package == a.key);
+        MCHECK(store.replace_profile_package(upgrade.name, a.key, next.key, e));
+        ModStore reopened("wiiparty", tmp / "datos", disc);
+        MCHECK(reopened.open(e) && reopened.load_profile(upgrade.name, upgrade, e) && upgrade.epoch == 2);
+        MCHECK(upgrade.mods[0].package == b.key && upgrade.mods[1].package == next.key && !upgrade.mods[1].enabled);
+        MCHECK(reopened.verify(a, e) && reopened.verify(next, e));
+        MCHECK(!reopened.replace_profile_package(upgrade.name, a.key, next.key, e));
+        MCHECK(reopened.replace_profile_package(upgrade.name, next.key, a.key, e));
+        MCHECK(reopened.set_active_profile("default", e) && reopened.delete_profile(upgrade.name, e) && reopened.uninstall(next.key, e));
+    }
     // Cancelación a mitad: no queda nada a medias (B14/D10)
     ModMeta mc;
     mc.name = "Mod C";
@@ -385,6 +407,26 @@ void test_store(const fs::path& tmp) {
     // Paquete rechazado: no se instala
     write_zip(tmp / "mal.zip", {{"files/opening.bnr", "B"}, {"x.exe", "MZ"}});
     MCHECK(!store.install(tmp / "mal.zip", mc, c, e));
+    {
+        // El manifiesto de datos condiciona la carga y viaja en la referencia de sala.
+        write_zip(tmp / "requires.zip", {{"files/opening.bnr", "C"},
+            {"wii-launcher-mod.json", R"({"schema":1,"game_id":"wiiparty","dependencies":[{"id":"local.mod-a","version":"1.0.0"}]})"}});
+        PackagePlan dependency_plan;
+        MCHECK(store.preview(tmp / "requires.zip", dependency_plan, e) && dependency_plan.ok() && dependency_plan.dependencies.size() == 1);
+        MCHECK(store.install(tmp / "requires.zip", mc, c, e) && store.verify(c, e));
+        Profile needs_base;
+        needs_base.mods = {{c.id(), c.key, true, {}}, {a.id(), a.key, false, {}}};
+        MCHECK(!store.compute(needs_base).problems.empty());
+        needs_base.mods[1].enabled = true;
+        const auto needed = store.compute(needs_base);
+        MCHECK(needed.problems.empty() && store.verify_profile(needs_base, needed.fingerprint, e));
+        SessionManifest parsed;
+        const auto manifest = build_session_manifest(store, needs_base, "test", 1, "123abc");
+        MCHECK(parse_session_manifest(manifest.dump(), parsed, e) && parsed.mods[0].dependencies[0].id == a.id());
+        MCHECK(!diff_session(store, needs_base, parsed, "456def").game_ok);
+        MCHECK(diff_session(store, needs_base, parsed, "123abc").compatible);
+        MCHECK(store.uninstall(c.key, e));
+    }
 
     // Perfiles: default vacío = vanilla
     Profile def;
@@ -436,8 +478,13 @@ void test_store(const fs::path& tmp) {
     fs::path a_file = tmp / "datos" / "packages" / a.key / "content" / "A" / "files" / "locale" / "sp_EU" / "mess.bin";
     put(a_file, "ALTERADO");
     MCHECK(!store.verify(a, e));
+    MCHECK(!store.verify_profile(only_a, ea.fingerprint, e));
     fs::path vd3;
     MCHECK(!store.build_vdisc(store.compute(only_a), vd3, e));
+    InstalledMod repaired, reused;
+    MCHECK(store.install(tmp / "a.zip", ma, repaired, e) && repaired.key != a.key && store.verify(repaired, e));
+    MCHECK(store.install(tmp / "a.zip", ma, reused, e) && reused.key == repaired.key);
+    MCHECK(store.uninstall(repaired.key, e));
 
     // Desinstalar: bloqueado si un perfil lo usa
     MCHECK(!store.uninstall(b.key, e));
@@ -485,8 +532,11 @@ struct MockHttp : wl::upd::HttpClient {
 void test_gamebanana(const fs::path& tmp) {
     MCHECK(gamebanana_url_allowed("https://gamebanana.com/dl/1"));
     MCHECK(gamebanana_url_allowed("https://files.gamebanana.com/mods/x.zip"));
+    MCHECK(gamebanana_url_allowed("https://filecache52.gamebanana.com/mods/x.zip"));
     for (const char* bad : {"http://gamebanana.com/dl/1", "https://gamebanana.com.evil.com/x", "https://evil.com/x", "file:///c:/x",
-                            "https://user@gamebanana.com/x", "https://gamebanana.com:8443/x", "https://192.168.1.10/x"})
+                            "https://user@gamebanana.com/x", "https://gamebanana.com:8443/x", "https://gamebanana.com:443extra/x",
+                            "https://filecache52.gamebanana.com.example.com/x", "https://filecacheabc.gamebanana.com/x",
+                            "https://192.168.1.10/x"})
         MCHECK(!gamebanana_url_allowed(bad));
     MCHECK(gamebanana_game("wiiparty") == 6370 && gamebanana_game("brawl") == 5678 && gamebanana_game("x") == 0);
     MCHECK(strip_html("<b>Hola</b> &amp; <a href='x'>adiós</a>") == "Hola & adiós");
@@ -546,9 +596,22 @@ void test_gamebanana(const fs::path& tmp) {
     wanted.source_file_id.clear();
     variants.files.back().version = "1.0";
     MCHECK(!resolve_catalog_file(variants, wanted));
+    InstalledMod original;
+    original.json = Json::object();
+    original.json.set("source_id", "7");
+    original.json.set("source_file_id", "70");
+    original.json.set("source_md5", d.files[0].md5);
+    original.json.set("source_added", 100);
+    MCHECK(is_catalog_update(variants, variants.files[0], original));   // mismo archivo, otros bytes
+    MCHECK(!is_catalog_update(variants, variants.files[1], original)); // bytes ya instalados
+    variants.files[1].md5 = std::string(32, 'b');
+    MCHECK(is_catalog_update(variants, variants.files[1], original));
+    variants.files[1].name = "incompatible.7z";
+    MCHECK(!is_catalog_update(variants, variants.files[1], original));
     // Descarga: redirección a files.gamebanana.com permitida; MD5 de "hello" correcto
     http.redirect("https://gamebanana.com/dl/70", "https://files.gamebanana.com/mods/bueno.zip");
-    http.ok("https://files.gamebanana.com/mods/bueno.zip", "hello");
+    http.redirect("https://files.gamebanana.com/mods/bueno.zip", "https://filecache52.gamebanana.com/mods/bueno.zip");
+    http.ok("https://filecache52.gamebanana.com/mods/bueno.zip", "hello");
     CatalogFile f = d.files[0];
     f.size = 5;
     MCHECK(gb.download(f, tmp / "dl" / "a.zip", e) && get(tmp / "dl" / "a.zip") == "hello");
@@ -626,8 +689,25 @@ void test_session(const fs::path& tmp) {
     MCHECK(d.items[0].state == ModDiff::Missing && d.items[0].downloadable);
     MCHECK(d.items[1].state == ModDiff::NoAuthorizedSource && !d.items[1].downloadable);
     MCHECK(!d.session_ready);
+    // Cuenta: los metadatos conservan un mod desactivado y otro paquete instalado fuera del perfil.
+    Profile account = hp;
+    account.mods.erase(account.mods.begin() + 1);
+    account.mods[0].enabled = false;
+    MCHECK(host.save_profile(account, e));
+    Json catalog_json;
+    MCHECK(export_profile_catalog(host, "default", catalog_json, e));
+    MCHECK(!export_profile_catalog(host, "session", catalog_json, e));
+    ProfileCatalog account_catalog;
+    MCHECK(parse_profile_catalog(catalog_json.dump(), account_catalog, e));
+    MCHECK(account_catalog.mods.size() == 2 && catalog_json.dump().find(ha.key) == std::string::npos);
+    CatalogRestore pending;
+    MCHECK(plan_catalog_restore(guest, account_catalog, pending, e) && !pending.complete &&
+           pending.downloads.size() == 1 && pending.manual.size() == 1);
     // Con los dos instalados pero desactivados (C08) y uno extra activo (C07): el perfil de sesión lo arregla.
     MCHECK(guest.install(tmp / "sa.zip", a, ga, e) && guest.install(tmp / "sb.zip", b, gb, e) && guest.install(tmp / "sx.zip", x, gx, e));
+    MCHECK(plan_catalog_restore(guest, account_catalog, pending, e) && pending.complete &&
+           pending.profile.mods.size() == 1 && pending.profile.mods[0].package == ga.key &&
+           !pending.profile.mods[0].enabled);
     gp.mods = {{gx.id(), gx.key, true, {}}, {ga.id(), ga.key, false, {}}, {gb.id(), gb.key, false, {}}};
     d = diff_session(guest, gp, m);
     MCHECK(!d.compatible && d.disabled == 2 && d.extra == 1 && d.session_ready);
