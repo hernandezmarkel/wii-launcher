@@ -6,6 +6,13 @@ solo una etiqueta `vX.Y.Z` aprobada publica algo.
 
 ## [Sin publicar]
 
+## [1.0.0-beta.6] - 2026-11-23
+
+- Mario Party 9 admite mods de datos mediante archivos de reemplazo y paquetes Riivolution de solo archivos. Puedes importarlos como ZIP o carpeta y gestionarlos con perfiles.
+- El catálogo de GameBanana indica qué mods tienes instalados. Al actualizar uno, se conserva la versión anterior y se mantienen el orden, la activación y las opciones compatibles del perfil.
+- El launcher compara los mods al unirte a una sala. Puede descargar los paquetes exactos que te falten desde GameBanana, con tu permiso. Verifica los archivos antes de marcar Listo y restaura tu perfil al salir.
+- Los paquetes pueden declarar dependencias. El launcher muestra los requisitos e identifica qué mod y versión debes activar.
+
 ## [1.0.0-beta.5] - 2026-11-19
 
 - Online: al empezar la partida desde la sala, la ventana del juego pasa al frente (o se minimiza el launcher).
