@@ -1,7 +1,10 @@
 #include "wl/account/auth.h"
+#include "wl/account/cloud.h"
+#include "wl/account/save.h"
 
 #include <chrono>
 #include <fstream>
+#include <future>
 #include <iostream>
 
 using namespace wl;
@@ -87,6 +90,124 @@ void unit_tests() {
     CHECK(a.clear(error) && a.load(token, error) && token.empty());
 }
 
+void save_tests() {
+    const auto root = scratch();
+    const auto a_root = root / "a", b_root = root / "b";
+    fs::create_directories(a_root);
+    fs::create_directories(b_root);
+    InstallStatus install;
+    install.folder = install.built = install.disc_ok = true;
+    install.disc_id = "SSQE01";
+    install.revision = "5a2b71d";
+    SaveTarget a, b;
+    std::string error;
+    const auto closed = [] { return false; };
+    const auto running = [] { return true; };
+    CHECK(game_save_target("mp9", a_root, install, a, error));
+    CHECK(game_save_target("mp9", b_root, install, b, error));
+    CHECK(a.slot_id == "53535145");
+    fs::create_directories(a.directory / "slots" / "empty");
+    std::ofstream(a.directory / "slots" / "save.bin", std::ios::binary).write("a\0b", 3);
+    SaveBundle source, copy;
+    CHECK(snapshot_save(a, closed, source, error));
+    CHECK(!snapshot_save(a, running, copy, error));
+    CHECK(!restore_save(b, running, source, error) && !fs::exists(b.directory));
+    CHECK(restore_save(b, closed, source, error));
+    CHECK(fs::is_directory(b.directory / "slots" / "empty"));
+    CHECK(snapshot_save(b, closed, copy, error) && source.bytes == copy.bytes && source.sha256 == copy.sha256);
+
+    copy.bytes.back() ^= 1;
+    CHECK(!restore_save(b, closed, copy, error));
+    auto traversal = source;
+    const auto entry = traversal.bytes.find("slots/save.bin");
+    CHECK(entry != traversal.bytes.npos);
+    if (entry != traversal.bytes.npos) {
+        traversal.bytes.replace(entry, 14, "slots/../x.dat");
+        traversal.sha256 = upd::sha256_hex(traversal.bytes);
+        CHECK(!restore_save(b, closed, traversal, error));
+    }
+    CHECK(snapshot_save(b, closed, copy, error) && source.sha256 == copy.sha256);
+    const auto pending = b.directory.parent_path() / ".wl-save-restore";
+    fs::create_directories(pending);
+    fs::rename(b.directory, pending / "previous"); // interrupción entre las dos operaciones de cambio
+    CHECK(!recover_save_restore(b, running, error) && !fs::exists(b.directory));
+    CHECK(recover_save_restore(b, closed, error));
+    CHECK(snapshot_save(b, closed, copy, error) && source.sha256 == copy.sha256);
+}
+
+
+void live_saves(upd::HttpClient& http_a, upd::HttpClient& http_b, const Config& cfg,
+                const Session& a, const Session& same_user_on_b, const Session& other_user) {
+    CloudClient desktop(http_a, cfg), laptop(http_b, cfg);
+    const auto root = scratch();
+    const SaveTarget local_a{root / "desktop" / "data", "mp9", "53535145", "SSQE01:fixture"};
+    const SaveTarget local_b{root / "laptop" / "data", "mp9", "53535145", "SSQE01:fixture"};
+    const auto closed = [] { return false; };
+    std::string error;
+    fs::create_directories(local_a.directory);
+    std::ofstream(local_a.directory / "progress.bin", std::ios::binary) << "progreso inicial";
+
+    auto make_revision = [&](const SaveBundle& b, const std::string& parent, const std::string& device) {
+        return SaveRevision{new_id(), parent, device, local_a.game_id, local_a.slot_id, local_a.compatibility, b.sha256, b.bytes.size()};
+    };
+    const auto device_a = new_id(), device_b = new_id();
+    CHECK(valid_user_id(device_a) && valid_user_id(device_b) && device_a != device_b);
+    SaveBundle first, incoming;
+    CHECK(snapshot_save(local_a, closed, first, error));
+    CHECK(desktop.head(a, local_a).state == SaveState::Missing);
+    const auto first_rev = make_revision(first, {}, device_a);
+    CHECK(desktop.push(a, first_rev, first).state == SaveState::Ok);
+    CHECK(laptop.head(same_user_on_b, local_b).revision_id == first_rev.revision_id);
+    CHECK(laptop.pull(same_user_on_b, local_b, first_rev.revision_id, incoming) == SaveState::Ok);
+    CHECK(restore_save(local_b, closed, incoming, error));
+    CHECK(snapshot_save(local_b, closed, incoming, error) && incoming.bytes == first.bytes);
+
+    std::ofstream(local_a.directory / "progress.bin", std::ios::binary | std::ios::app) << " + escritorio";
+    std::ofstream(local_b.directory / "progress.bin", std::ios::binary | std::ios::app) << " + portátil";
+    SaveBundle left, right;
+    CHECK(snapshot_save(local_a, closed, left, error) && snapshot_save(local_b, closed, right, error));
+    const auto left_rev = make_revision(left, first_rev.revision_id, device_a);
+    const auto right_rev = make_revision(right, first_rev.revision_id, device_b);
+    auto uploading = std::async(std::launch::async, [&] { return desktop.push(a, left_rev, left); });
+    const auto b_result = laptop.push(same_user_on_b, right_rev, right);
+    const auto a_result = uploading.get();
+    CHECK((a_result.state == SaveState::Ok && b_result.state == SaveState::Conflict) ||
+          (b_result.state == SaveState::Ok && a_result.state == SaveState::Conflict));
+    const auto head = desktop.head(a, local_a);
+    const auto winner = a_result.state == SaveState::Ok ? left_rev.revision_id : right_rev.revision_id;
+    CHECK(head.state == SaveState::Ok && head.revision_id == winner && head.version == 2);
+    CHECK(laptop.pull(same_user_on_b, local_b, left_rev.revision_id, incoming) == SaveState::Ok && incoming.bytes == left.bytes);
+    CHECK(desktop.pull(a, local_a, right_rev.revision_id, incoming) == SaveState::Ok && incoming.bytes == right.bytes);
+    CHECK(desktop.push(a, left_rev, left).state == a_result.state);
+
+    CHECK(laptop.head(other_user, local_b).state == SaveState::Missing);
+    CHECK(laptop.pull(other_user, local_b, first_rev.revision_id, incoming) == SaveState::Missing);
+    const auto key = a.user_id + "/mp9/53535145/" + first_rev.revision_id;
+    upd::HttpRequest request;
+    request.headers = {{"apikey", cfg.public_key},{"Authorization", "Bearer " + other_user.access_token}};
+    request.url = cfg.origin + "/storage/v1/object/authenticated/wiiports-saves/" + key;
+    auto result = http_b.perform(request);
+    CHECK(result.status >= 400 && result.status < 500);
+    request.method = "POST";
+    request.url = cfg.origin + "/storage/v1/object/wiiports-saves/" + a.user_id + "/mp9/53535145/" + new_id();
+    request.headers.emplace_back("Content-Type", "application/octet-stream");
+    request.body = "ajeno";
+    result = http_b.perform(request);
+    CHECK(result.status >= 400 && result.status < 500);
+    request.method = "DELETE";
+    request.url = cfg.origin + "/storage/v1/object/wiiports-saves/" + key;
+    request.body.clear();
+    const auto denied = http_b.perform(request);
+    CHECK(denied.status >= 400 && denied.status < 500);
+    request.method = "POST";
+    request.url = cfg.origin + "/storage/v1/object/list/wiiports-saves";
+    request.headers.back().second = "application/json";
+    request.body = "{\"prefix\":\"" + a.user_id + "\",\"limit\":10}";
+    result = http_b.perform(request);
+    CHECK(result.status == 200 && result.body == "[]");
+    CHECK(desktop.pull(a, local_a, first_rev.revision_id, incoming) == SaveState::Ok && incoming.bytes == first.bytes);
+}
+
 int live() {
     auto cfg = Config::from_environment();
     if (!cfg.valid() || cfg.origin.rfind("http://127.0.0.1:", 0) != 0) return 2;
@@ -141,11 +262,15 @@ int live() {
     auto erase = http_a->perform(access);
     CHECK(erase.status == 200 && erase.body == "[]");
     CHECK(b.profile(b1.session).alias == alias_b);
+    auto second_device = b.sign_in(email_a, kPassword);
+    CHECK(second_device.ok() && second_device.session.user_id == renewed.session.user_id);
+    if (second_device.ok()) live_saves(*http_a, *http_b, cfg, renewed.session, second_device.session, b1.session);
+    if (second_device.ok()) CHECK(b.sign_out(second_device.session.access_token).ok());
 
     CHECK(a.sign_out(renewed.session.access_token).ok() && vault.clear(error));
     CHECK(!a.refresh(renewed.session.refresh_token).ok());
     CHECK(b.sign_out(b1.session.access_token).ok());
-    if (!failures) std::cout << "Supabase real local: registro A/B, login, rotación, logout, DPAPI y RLS de perfil correctos.\n";
+    if (!failures) std::cout << "Supabase real local: cuentas A/B, sesión, RLS, Storage y conflicto de guardados correctos.\n";
     return failures ? 1 : 0;
 }
 
@@ -154,6 +279,7 @@ int live() {
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--live") return live();
     unit_tests();
+    save_tests();
     if (!failures) std::cout << "Contratos de cuenta y DPAPI correctos.\n";
     return failures ? 1 : 0;
 }
