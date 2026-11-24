@@ -1,6 +1,6 @@
 #pragma once
 
-#include "wl/account/auth.h"
+#include "wl/account/cloud.h"
 
 #include <condition_variable>
 #include <mutex>
@@ -28,6 +28,7 @@ public:
     void request_recovery(std::string email);
     void reset_password(std::string email, std::string code, std::string password);
     void set_alias(std::string alias);
+    void sync_mod_catalog(std::string game_id, fs::path install_root, bool upload);
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -41,6 +42,7 @@ private:
 
     std::unique_ptr<upd::HttpClient> http_;
     AuthClient client_;
+    CloudClient cloud_;
     SessionVault vault_;
     const std::function<void()> wake_;
     mutable std::mutex mutex_;

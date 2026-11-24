@@ -21,6 +21,11 @@ bool valid_target(const SaveTarget& t) {
            t.compatibility.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:._-") == t.compatibility.npos;
 }
 
+bool catalog_coordinates(const std::string& game, const std::string& profile) {
+    return (game == "mp9" || game == "wiiparty") && !profile.empty() && profile.size() <= 40 && profile != "session" &&
+           profile.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") == profile.npos;
+}
+
 bool valid_access(const Session& session) {
     const auto& token = session.access_token;
     return valid_user_id(session.user_id) && !token.empty() && token.size() <= 8192 &&
@@ -164,6 +169,65 @@ SaveState CloudClient::pull(const Session& session, const SaveTarget& target, co
         return SaveState::Rejected;
     out = {std::move(download.body), hash};
     return SaveState::Ok;
+}
+
+
+CatalogResult CloudClient::mod_catalog(const Session& session, const std::string& game, const std::string& profile) {
+    if (!config_.valid() || !valid_access(session) || !catalog_coordinates(game, profile)) return {};
+    const auto response = send(session, "GET", "/rest/v1/account_mod_profiles?select=version,catalog,sha256&user_id=eq." +
+                               session.user_id + "&game_id=eq." + game + "&profile_name=eq." + profile,
+                               {}, nullptr, 512 * 1024);
+    const auto state = classify(response);
+    if (state != SaveState::Ok) return {state, 0, {}};
+    Json rows;
+    if (!parse(response, rows) || !rows.is_array() || rows.size() > 1) return {};
+    if (!rows.size()) return {SaveState::Missing, 0, {}};
+    auto version = rows[0]["version"].num();
+    auto text = rows[0]["catalog"].dump();
+    const auto expected = rows[0]["sha256"].str();
+    mods::ProfileCatalog catalog;
+    std::string ignored;
+    if (version <= 0 || !is_hex(expected, 64) || upd::sha256_hex(text) != expected ||
+        !mods::parse_profile_catalog(text, catalog, ignored) || catalog.game_id != game || catalog.profile_name != profile)
+        return {};
+    return {SaveState::Ok, version, std::move(catalog)};
+}
+
+CatalogResult CloudClient::push_mod_catalog(const Session& session, const std::string& text, int64_t expected_version) {
+    constexpr size_t kMaxCatalogBytes = 256 * 1024;
+    if (!config_.valid() || !valid_access(session) || text.size() > kMaxCatalogBytes ||
+        expected_version < 0 || expected_version >= 2147483647) return {};
+    mods::ProfileCatalog catalog;
+    std::string ignored;
+    if (!mods::parse_profile_catalog(text, catalog, ignored) ||
+        !catalog_coordinates(catalog.game_id, catalog.profile_name)) return {};
+    Json data = Json::object();
+    data.set("schema", "wii-launcher-mod-catalog");
+    data.set("version", 1);
+    data.set("game_id", catalog.game_id);
+    data.set("base_content_id", catalog.base_content_id);
+    data.set("loader", catalog.loader);
+    data.set("profile", catalog.profile_name);
+    Json refs = Json::array();
+    for (const auto& ref : catalog.mods) refs.push(mods::serialize_mod_reference(ref));
+    data.set("mods", std::move(refs));
+    const auto canonical = data.dump();
+    if (canonical.size() > kMaxCatalogBytes) return {};
+    Json rpc = Json::object();
+    rpc.set("p_game", catalog.game_id);
+    rpc.set("p_profile", catalog.profile_name);
+    rpc.set("p_version", expected_version);
+    rpc.set("p_hash", upd::sha256_hex(canonical));
+    rpc.set("p_catalog", std::move(data));
+    const auto reply = send(session, "POST", "/rest/v1/rpc/account_commit_mod_catalog", rpc.dump(), "application/json");
+    const auto state = classify(reply);
+    if (state != SaveState::Ok) return {state, 0, {}};
+    Json result;
+    if (!parse(reply, result) || !result.is_object()) return {};
+    const auto next = result["version"].num(-1);
+    if (result["status"].str() == "conflict" && next >= 0) return {SaveState::Conflict, next, {}};
+    if (result["status"].str() != "committed" || next != expected_version + 1) return {};
+    return {SaveState::Ok, next, std::move(catalog)};
 }
 
 }  // namespace wl::account

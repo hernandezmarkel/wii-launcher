@@ -2,6 +2,7 @@
 
 #include "wl/account/auth.h"
 #include "wl/account/save.h"
+#include "wl/mods/profile_catalog.h"
 
 namespace wl::account {
 
@@ -19,6 +20,12 @@ struct HeadResult {
     int64_t version = 0;
 };
 
+struct CatalogResult {
+    SaveState state = SaveState::Rejected;
+    int64_t version = 0;
+    mods::ProfileCatalog catalog;
+};
+
 std::string new_id();
 
 class CloudClient {
@@ -27,6 +34,8 @@ public:
     HeadResult head(const Session& session, const SaveTarget& target);
     HeadResult push(const Session& session, const SaveRevision& revision, const SaveBundle& bundle);
     SaveState pull(const Session& session, const SaveTarget& target, const std::string& revision_id, SaveBundle& out);
+    CatalogResult mod_catalog(const Session& session, const std::string& game, const std::string& profile);
+    CatalogResult push_mod_catalog(const Session& session, const std::string& catalog, int64_t expected_version);
 
 private:
     upd::HttpResponse send(const Session& session, const char* method, const std::string& path,

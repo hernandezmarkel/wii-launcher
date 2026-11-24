@@ -2,11 +2,12 @@
 
 #include <algorithm>
 #include <utility>
+#include "wl/mods/launch.h"
 
 namespace wl::account {
 
 AccountService::AccountService(Config config, const fs::path& data_root, std::function<void()> wake)
-    : http_(upd::make_winhttp_client()), client_(*http_, config),
+    : http_(upd::make_winhttp_client()), client_(*http_, config), cloud_(*http_, config),
       vault_(data_root / upd::sha256_hex(config.origin) / "session.dat", config.origin), wake_(std::move(wake)) {
     view_.configured = client_.configured();
     if (view_.configured) {
@@ -178,6 +179,54 @@ void AccountService::set_alias(std::string alias) {
         const auto result = client_.set_alias(session_, alias);
         if (result.ok()) account(true, result.alias);
         feedback(result.ok() ? "Alias guardado." : result.message, !result.ok());
+    });
+}
+
+
+void AccountService::sync_mod_catalog(std::string game_id, fs::path install_root, bool upload) {
+    post([this, game_id = std::move(game_id), install_root = std::move(install_root), upload] {
+        if (!valid_user_id(session_.user_id)) return;
+        mods::ModStore store(game_id, mods::default_mods_root(game_id), mods::extracted_dir(game_id, install_root));
+        std::string error;
+        if (!store.open(error)) {
+            feedback("No se pudo verificar el almacén local de mods.", true);
+            return;
+        }
+        const auto active = store.active_profile();
+        if (active == "session") {
+            feedback("Selecciona un perfil habitual de mods antes de sincronizar.", true);
+            return;
+        }
+        if (upload) {
+            mods::Json catalog;
+            if (!mods::export_profile_catalog(store, active, catalog, error)) {
+                feedback("El gestor no pudo exportar el perfil activo.", true);
+                return;
+            }
+            const auto result = cloud_.push_mod_catalog(session_, catalog.dump(), 0);
+            if (result.state == SaveState::Conflict)
+                feedback("Ya existe una copia de ese perfil. Puedes compararla desde aquí.", true);
+            else if (result.state == SaveState::Ok)
+                feedback("Referencias de mods guardadas en tu cuenta.", false);
+            else
+                feedback("No se pudo guardar el perfil de mods.", true);
+            return;
+        }
+        const auto remote = cloud_.mod_catalog(session_, game_id, active);
+        if (remote.state == SaveState::Missing) {
+            feedback("Todavía no hay una copia remota de ese perfil.", false);
+        } else if (remote.state != SaveState::Ok) {
+            feedback("No se pudo consultar el perfil de mods.", true);
+        } else {
+            mods::CatalogRestore plan;
+            if (!mods::plan_catalog_restore(store, remote.catalog, plan, error)) {
+                feedback("La copia remota requiere otro disco o cargador de mods.", true);
+                return;
+            }
+            feedback("Copia remota · " + std::to_string(remote.catalog.mods.size()) +
+                     " referencias · " + std::to_string(plan.downloads.size()) + " por descargar · " +
+                     std::to_string(plan.manual.size()) + " por importar manualmente.", false);
+        }
     });
 }
 

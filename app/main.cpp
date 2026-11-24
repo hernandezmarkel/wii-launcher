@@ -218,6 +218,7 @@ struct App {
     std::unique_ptr<RoomSession> room;
     int room_game = -1;
     char name[32] = {};
+    bool room_name_from_account = false;
     char address[64] = {};
     int port = 0;
     int start_option = 1;
@@ -815,6 +816,20 @@ void account_page(App& app, float width) {
             app.accounts->sign_out();
             app.account_alias[0] = '\0';
             app.account_email[0] = '\0';
+        }
+        if (!app.games.empty()) {
+            const auto& game = *app.games[app.selected];
+            const auto* support = mods::game_support(game.manifest.game_id);
+            if (support && support->proven) {
+                ImGui::SetCursorPosX(px(22));
+                text(g_regular, 13, P.dim, ("Perfil de mods activo · " + game.manifest.display_name).c_str());
+                ImGui::SetCursorPosX(px(22));
+                if (button("Crear copia de mods", Btn::Secondary, true, px(185)))
+                    app.accounts->sync_mod_catalog(game.manifest.game_id, game.root, true);
+                ImGui::SameLine();
+                if (button("Comparar copia remota", Btn::Secondary, true, px(190)))
+                    app.accounts->sync_mod_catalog(game.manifest.game_id, game.root, false);
+            }
         }
     } else {
         ImGui::SetNextItemWidth(px(290));
@@ -1633,6 +1648,12 @@ void leave_room(App& app) {
 }
 
 void open_room(App& app, bool host) {
+    if (app.page != Page::Room) {
+        const auto account = app.accounts->view();
+        app.room_name_from_account = account.signed_in && !account.alias.empty();
+        const auto fallback = app.prefs.get("online_name", SDL_getenv("USERNAME") ? SDL_getenv("USERNAME") : "Jugador");
+        std::snprintf(app.name, sizeof app.name, "%s", (app.room_name_from_account ? account.alias : fallback).c_str());
+    }
     if (app.room || app.join_preflight) leave_room(app);
     Game& g = *app.games[app.selected];
     app.room_error.clear();
@@ -1846,7 +1867,8 @@ void room_page(App& app, float width) {
         text(g_regular, 13, P.faint, "Tu nombre");
         ImGui::SetCursorPosX(px(22));
         ImGui::SetNextItemWidth(px(260));
-        if (ImGui::InputText("##name", app.name, sizeof app.name)) app.prefs.set("online_name", app.name);
+        if (ImGui::InputText("##name", app.name, sizeof app.name) && !app.room_name_from_account)
+            app.prefs.set("online_name", app.name);
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 13, P.faint, "Dirección del anfitrión y puerto");
         ImGui::SetCursorPosX(px(22));
