@@ -3,13 +3,16 @@
 #include <algorithm>
 #include <utility>
 #include "wl/mods/launch.h"
+#include "wl/account/queue.h"
 
 namespace wl::account {
 
 AccountService::AccountService(Config config, const fs::path& data_root, std::function<void()> wake)
     : http_(upd::make_winhttp_client()), client_(*http_, config), cloud_(*http_, config),
-      vault_(data_root / upd::sha256_hex(config.origin) / "session.dat", config.origin), wake_(std::move(wake)) {
+      data_root_(data_root / upd::sha256_hex(config.origin).substr(0, 24)),
+      vault_(data_root_ / "session.dat", config.origin), wake_(std::move(wake)) {
     view_.configured = client_.configured();
+    view_.identity_ready = !view_.configured;
     if (view_.configured) {
         view_.busy = true;
         job_ = [this] { resume(); };
@@ -32,16 +35,18 @@ AccountView AccountService::view() const {
     return view_;
 }
 
-void AccountService::post(std::function<void()> job) {
+bool AccountService::post(std::function<void()> job, bool lock_save) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!view_.configured || view_.busy || stop_) return;
+        if (!view_.configured || view_.busy || stop_) return false;
         view_.busy = true;
         view_.message.clear();
         view_.warning = false;
+        view_.save_locked = lock_save;
         job_ = std::move(job);
     }
     changed_.notify_one();
+    return true;
 }
 
 void AccountService::run() {
@@ -62,6 +67,7 @@ void AccountService::run() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             view_.busy = false;
+            view_.save_locked = false;
         }
         if (wake_) wake_();
     }
@@ -76,12 +82,23 @@ void AccountService::feedback(std::string message, bool warning) {
 void AccountService::account(bool signed_in, std::string alias) {
     std::lock_guard<std::mutex> lock(mutex_);
     view_.signed_in = signed_in;
+    view_.local_owner = signed_in ? session_.user_id : std::string{};
     view_.alias = std::move(alias);
 }
 
 void AccountService::resume() {
-    std::string refresh, error;
-    if (!vault_.load(refresh, error)) {
+    std::string refresh, error, owner;
+    const bool read = vault_.load(refresh, error, &owner);
+    if (read && !owner.empty()) {
+        session_.user_id = std::move(owner);
+        account(true);
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        view_.identity_ready = true;
+    }
+    if (wake_) wake_();
+    if (!read) {
         feedback(error, true);
         return;
     }
@@ -131,7 +148,7 @@ void AccountService::accept(AuthResult result) {
     next_refresh_ = Clock::now() + std::max(delay - std::chrono::seconds(60), std::chrono::seconds(1));
     backoff_ = std::chrono::seconds(5);
     std::string error;
-    const bool persisted = vault_.save(session_.refresh_token, error);
+    const bool persisted = vault_.save(session_.refresh_token, error, session_.user_id);
     const auto current = client_.profile(session_);
     const auto previous = view();
     account(true, current.ok() ? current.alias : same_user ? previous.alias : std::string{});
@@ -228,6 +245,125 @@ void AccountService::sync_mod_catalog(std::string game_id, fs::path install_root
                      std::to_string(plan.manual.size()) + " por importar manualmente.", false);
         }
     });
+}
+
+
+std::optional<SaveLocation> AccountService::local_save(const std::string& game, const fs::path& install_root,
+                                                       const InstallStatus& status) const {
+    return save_location(data_root_, view().local_owner, game, install_root, status);
+}
+
+void AccountService::enable_save(SaveLocation location) {
+    post([this, location = std::move(location)] {
+        if (location.owner != session_.user_id) return;
+        if (game_process_running(location.target.game_id)) {
+            feedback("Cierra el juego antes de activar un guardado de cuenta.", true);
+            return;
+        }
+        const bool enabled = enable_save_location(location);
+        feedback(enabled ? "Guardado de cuenta activado para el juego sin conexión." : "No se pudo crear el guardado separado.", !enabled);
+    }, true);
+}
+
+bool AccountService::synchronize_save(SaveLocation location) {
+    return post([this, location = std::move(location)] {
+        if (location.owner != session_.user_id || !save_location_enabled(location)) return;
+        std::string error;
+        SaveBaseline baseline;
+        if (!read_save_baseline(location, baseline)) {
+            feedback("La referencia del guardado local está dañada.", true);
+            return;
+        }
+        SaveBundle snapshot;
+        const auto running = [&] { return game_process_running(location.target.game_id); };
+        if (!snapshot_save(location.target, running, snapshot, error)) {
+            feedback(error, true);
+            return;
+        }
+        SaveQueue queue(data_root_ / "queue" / location.target.game_id / location.target.slot_id, location.owner);
+        if (snapshot.sha256 != baseline.sha256) {
+            const auto id = new_id();
+            const auto device = load_device_id(data_root_);
+            const auto& target = location.target;
+            const SaveRevision revision{id, baseline.revision, device, target.game_id, target.slot_id,
+                                        target.compatibility, snapshot.sha256, snapshot.bytes.size()};
+            if (!queue.enqueue(revision, snapshot, error)) {
+                feedback(error, true);
+                return;
+            }
+        }
+        if (session_.access_token.empty() || session_.expires_at <= std::chrono::system_clock::now()) {
+            feedback("Copia local pendiente. Se puede volver a sincronizar cuando haya conexión.", false);
+            return;
+        }
+
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto result = queue.process_next(cloud_, session_, now, error);
+        switch (result.state) {
+        case QueueState::Uploaded: {
+            const auto head = cloud_.head(session_, location.target);
+            if (head.state != SaveState::Ok) {
+                feedback("Se subió la revisión. Queda por confirmar el avance en este equipo.", true);
+            } else if (head.revision_id != result.revision_id) {
+                queue.acknowledge(result.revision_id, error);
+                feedback("La copia se conservó. Hay una revisión remota posterior.", true);
+            } else if (!write_save_baseline(location, {result.revision_id, result.sha256}) ||
+                       !queue.acknowledge(result.revision_id, error)) {
+                feedback("Se subió la revisión. Queda por confirmar el avance en este equipo.", true);
+            } else {
+                feedback("Guardado sincronizado.", false);
+            }
+            break;
+        }
+        case QueueState::Empty:
+            feedback("El guardado local coincide con la última revisión de este equipo.", false);
+            break;
+        case QueueState::Conflict:
+            feedback("Hay dos avances distintos. Ambas copias se han conservado.", true);
+            break;
+        case QueueState::Deferred:
+            feedback("Copia pendiente. Vuelve a sincronizar cuando haya conexión.", false);
+            break;
+        case QueueState::Rejected:
+            feedback(error.empty() ? "Supabase rechazó la copia. El guardado local está disponible." : error, true);
+            break;
+        }
+    });
+}
+
+void AccountService::restore_cloud_save(SaveLocation location) {
+    post([this, location = std::move(location)] {
+        if (location.owner != session_.user_id || !save_location_enabled(location)) return;
+        if (session_.access_token.empty() || session_.expires_at <= std::chrono::system_clock::now()) {
+            feedback("Se necesita conexión para descargar el guardado.", true);
+            return;
+        }
+        const auto running = [&] { return game_process_running(location.target.game_id); };
+        if (running()) {
+            feedback("Cierra el juego antes de restaurar el guardado.", true);
+            return;
+        }
+        const auto head = cloud_.head(session_, location.target);
+        if (head.state != SaveState::Ok) {
+            feedback(head.state == SaveState::Missing ? "Todavía no hay un guardado remoto." : "No se pudo consultar el guardado remoto.",
+                     head.state != SaveState::Missing);
+            return;
+        }
+        SaveBundle bundle;
+        if (cloud_.pull(session_, location.target, head.revision_id, bundle) != SaveState::Ok) {
+            feedback("No se pudo verificar la copia remota para esta versión del juego.", true);
+            return;
+        }
+        std::string error;
+        if (!restore_save(location.target, running, bundle, error)) {
+            feedback(error, true);
+            return;
+        }
+        const bool saved = write_save_baseline(location, {head.revision_id, bundle.sha256});
+        feedback(saved ? "Guardado restaurado. Se ha conservado la copia anterior." :
+                         "Guardado restaurado. No se pudo registrar su revisión en este equipo.", !saved);
+    }, true);
 }
 
 }  // namespace wl::account

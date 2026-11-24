@@ -63,12 +63,12 @@ private:
     const bool configured_;
 };
 
-// Persiste únicamente el refresh token protegido por DPAPI y ligado al origen.
+// Persiste el refresh token y la identidad local protegidos por DPAPI, ligados al origen.
 class SessionVault {
 public:
     SessionVault(fs::path file, std::string origin);
-    bool load(std::string& token, std::string& error) const;
-    bool save(const std::string& token, std::string& error) const;
+    bool load(std::string& token, std::string& error, std::string* cached_user = nullptr) const;
+    bool save(const std::string& token, std::string& error, const std::string& user_id = {}) const;
     bool clear(std::string& error) const;
 
 private:

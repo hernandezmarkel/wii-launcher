@@ -102,7 +102,7 @@ endif()
 
 add_library(wl_account STATIC
     account/src/auth.cpp account/src/vault_win.cpp account/src/service.cpp
-    account/src/save_win.cpp account/src/cloud.cpp account/src/queue_win.cpp)
+    account/src/save_win.cpp account/src/cloud.cpp account/src/queue_win.cpp account/src/location_win.cpp)
 target_include_directories(wl_account PUBLIC account/include)
 target_link_libraries(wl_account PUBLIC wl_mods crypt32)
 target_compile_options(wl_account PRIVATE -Wall -Wextra)

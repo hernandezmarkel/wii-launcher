@@ -1,6 +1,7 @@
 #pragma once
 
 #include "wl/account/cloud.h"
+#include "wl/account/location.h"
 
 #include <condition_variable>
 #include <mutex>
@@ -13,6 +14,9 @@ struct AccountView {
     bool busy = false;
     bool signed_in = false;
     bool warning = false;
+    bool save_locked = false;
+    bool identity_ready = false;
+    std::string local_owner;
     std::string alias;
     std::string message;
 };
@@ -29,10 +33,15 @@ public:
     void reset_password(std::string email, std::string code, std::string password);
     void set_alias(std::string alias);
     void sync_mod_catalog(std::string game_id, fs::path install_root, bool upload);
+    std::optional<SaveLocation> local_save(const std::string& game, const fs::path& install_root,
+                                           const InstallStatus& status) const;
+    void enable_save(SaveLocation location);
+    bool synchronize_save(SaveLocation location);
+    void restore_cloud_save(SaveLocation location);
 
 private:
     using Clock = std::chrono::steady_clock;
-    void post(std::function<void()> job);
+    bool post(std::function<void()> job, bool lock_save = false);
     void run();
     void resume();
     void renew();
@@ -43,6 +52,7 @@ private:
     std::unique_ptr<upd::HttpClient> http_;
     AuthClient client_;
     CloudClient cloud_;
+    const fs::path data_root_;
     SessionVault vault_;
     const std::function<void()> wake_;
     mutable std::mutex mutex_;

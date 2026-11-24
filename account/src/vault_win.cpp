@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <fstream>
+#include <string_view>
 
 #include <windows.h>
 #include <dpapi.h>
@@ -31,8 +32,9 @@ struct ProtectedBytes {
 SessionVault::SessionVault(fs::path file, std::string origin)
     : file_(std::move(file)), origin_("wii-launcher account session v1:" + std::move(origin)) {}
 
-bool SessionVault::load(std::string& token, std::string& error) const {
+bool SessionVault::load(std::string& token, std::string& error, std::string* cached_user) const {
     token.clear();
+    if (cached_user) cached_user->clear();
     error.clear();
     std::error_code ec;
     const auto present = fs::exists(file_, ec);
@@ -51,20 +53,38 @@ bool SessionVault::load(std::string& token, std::string& error) const {
     auto input = blob(buffer), entropy = blob(origin_);
     ProtectedBytes plain;
     if (!CryptUnprotectData(&input, nullptr, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &plain.data) ||
-        plain.data.cbData == 0 || plain.data.cbData > kMaxRefresh) {
+        plain.data.cbData == 0 || plain.data.cbData > kMaxRefresh + 40) {
         error = "Windows no pudo abrir la sesión protegida. Vuelve a iniciar sesión.";
         return false;
     }
-    token.assign(reinterpret_cast<const char*>(plain.data.pbData), plain.data.cbData);
+    const std::string_view value(reinterpret_cast<const char*>(plain.data.pbData), plain.data.cbData);
+    if (value.substr(0, 3) == "v2\n") {
+        const auto id = std::string(value.substr(3, 36));
+        if (value.size() <= 40 || value[39] != '\n' || value.size() - 40 > kMaxRefresh || !valid_user_id(id)) {
+            error = "La sesión protegida no tiene una identidad válida.";
+            return false;
+        }
+        token.assign(value.substr(40));
+        if (cached_user) *cached_user = id;
+    } else {
+        if (value.size() > kMaxRefresh) return false;
+        token.assign(value);
+    }
     return true;
 }
 
-bool SessionVault::save(const std::string& token, std::string& error) const {
+bool SessionVault::save(const std::string& token, std::string& error, const std::string& user_id) const {
     error.clear();
-    auto input = blob(token), entropy = blob(origin_);
+    if (token.empty() || token.size() > kMaxRefresh || (!user_id.empty() && !valid_user_id(user_id))) {
+        error = "La sesión no es válida para guardarla.";
+        return false;
+    }
+    std::string receipt = user_id.empty() ? token : "v2\n" + user_id + "\n" + token;
+    auto input = blob(receipt), entropy = blob(origin_);
     ProtectedBytes encrypted;
-    if (token.empty() || token.size() > kMaxRefresh ||
-        !CryptProtectData(&input, nullptr, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &encrypted.data)) {
+    const bool protected_ok = CryptProtectData(&input, nullptr, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &encrypted.data);
+    SecureZeroMemory(receipt.data(), receipt.size());
+    if (!protected_ok) {
         error = "Windows no pudo proteger la sesión.";
         return false;
     }

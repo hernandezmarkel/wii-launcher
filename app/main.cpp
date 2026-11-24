@@ -194,6 +194,7 @@ struct Game {
     std::atomic<long long> running_pid{0};
     std::atomic<bool> preparing{false};   // preparando el disco virtual de los mods antes de lanzar
     std::atomic<bool> end_session_on_exit{false};   // partida online con perfil de sesión: volver al habitual al cerrar
+    std::optional<account::SaveLocation> completed_account_save;
     std::string message;
     bool message_bad = false;
     // Online con servidor en la LAN (lan_wfc): IP del anfitrión que se escribe en la configuración del juego.
@@ -215,6 +216,8 @@ struct App {
     char account_code[7] = {};
     char account_alias[25] = {};
     bool account_recovery = false;
+    fs::path account_confirm_enable;
+    fs::path account_confirm_restore;
     std::unique_ptr<RoomSession> room;
     int room_game = -1;
     char name[32] = {};
@@ -341,7 +344,7 @@ void bring_game_to_front(long long pid) {
 #endif
 }
 
-void launch(Game& g, const LaunchSpec& spec) {
+void launch(Game& g, const LaunchSpec& spec, std::optional<account::SaveLocation> account_save = {}) {
     if (g.running_pid.load() != 0) {
         set_message(g, "El juego ya está abierto.", false);
         return;
@@ -357,13 +360,14 @@ void launch(Game& g, const LaunchSpec& spec) {
     g.running_pid = p.pid;
     bring_game_to_front(p.pid);
     // Un hilo espera a que el juego termine; la UI no se bloquea.
-    std::thread([&g, pid = p.pid] {
+    std::thread([&g, pid = p.pid, account_save = std::move(account_save)] {
         int code = wait_exit(pid, -1);
         if (g.end_session_on_exit.exchange(false)) end_mod_session(g);
         {
             std::lock_guard<std::mutex> lock(g.mutex);
             g.running_pid = 0;
             if (code == 0) {
+                if (account_save) g.completed_account_save = account_save;
                 g.message = "El juego se ha cerrado.";
                 g.message_bad = false;
             } else {
@@ -397,14 +401,15 @@ std::string active_fingerprint(const Game& g, std::string* error = nullptr) {
 // Lanza con el perfil de mods activo. El disco virtual se prepara en un hilo (enlaces y hashes) y solo
 // entonces se abre el juego. `expected`: fingerprint acordado en la sala; si el perfil cambió desde
 // entonces, no se lanza (nunca se juega online con otro conjunto de mods).
-void launch_modded(Game& g, LaunchSpec spec, std::string expected = {}) {
+void launch_modded(Game& g, LaunchSpec spec, std::string expected = {},
+                   std::optional<account::SaveLocation> account_save = {}) {
     if (g.running_pid.load() != 0 || g.preparing.exchange(true)) {
         set_message(g, "El juego ya está abierto o preparándose.", false);
         return;
     }
     set_message(g, "Preparando los mods…", false);
     wake();
-    std::thread([&g, spec, expected]() mutable {
+    std::thread([&g, spec, expected, account_save = std::move(account_save)]() mutable {
         mods::LaunchMods info;
         std::string error;
         bool ok = mods::prepare_launch(g.manifest.game_id, g.root, spec, info, error);
@@ -412,14 +417,18 @@ void launch_modded(Game& g, LaunchSpec spec, std::string expected = {}) {
             ok = false;
             error = "Tus mods han cambiado desde que entraste en la sala: no se abre el juego para no desincronizar la partida.";
         }
-        g.preparing = false;
+        if (ok && account_save) {
+            const auto running = [&] { return account::game_process_running(g.manifest.game_id); };
+            ok = account::launch_with_save_location(spec, *account_save, running, error);
+        }
         if (!ok) {
             set_message(g, "No se puede lanzar con mods: " + error, true);
             if (!expected.empty()) end_mod_session(g);
         } else {
             if (!expected.empty()) g.end_session_on_exit = true;
-            launch(g, spec);
+            launch(g, spec, std::move(account_save));
         }
+        g.preparing = false;
         wake();
     }).detach();
 }
@@ -816,9 +825,47 @@ void account_page(App& app, float width) {
             app.accounts->sign_out();
             app.account_alias[0] = '\0';
             app.account_email[0] = '\0';
+            app.account_confirm_enable.clear();
+            app.account_confirm_restore.clear();
         }
         if (!app.games.empty()) {
-            const auto& game = *app.games[app.selected];
+            auto& game = *app.games[app.selected];
+            InstallStatus status;
+            {
+                std::lock_guard<std::mutex> lock(game.mutex);
+                status = game.status;
+            }
+            const auto save = app.accounts->local_save(game.manifest.game_id, game.root, status);
+            if (save) {
+                const bool free = !game.preparing && !game.running_pid.load();
+                ImGui::SetCursorPosX(px(22));
+                text(g_regular, 13, P.dim, ("Guardado de cuenta · " + game.manifest.display_name).c_str());
+                ImGui::SetCursorPosX(px(22));
+                if (!account::save_location_enabled(*save)) {
+                    if (app.account_confirm_enable == save->work) {
+                        text(g_regular, 13, P.dim, "Se creará un guardado vacío separado para jugar sin conexión.", width - px(44));
+                        ImGui::SetCursorPosX(px(22));
+                        if (button("Confirmar guardado separado", Btn::Primary, free, px(245))) {
+                            app.accounts->enable_save(*save);
+                            app.account_confirm_enable.clear();
+                        }
+                    } else if (button("Activar guardado de cuenta", Btn::Secondary, free, px(235))) {
+                        app.account_confirm_enable = save->work;
+                    }
+                } else {
+                    if (button("Sincronizar guardado", Btn::Secondary, free, px(180)))
+                        app.accounts->synchronize_save(*save);
+                    ImGui::SameLine();
+                    if (app.account_confirm_restore == save->work) {
+                        if (button("Restaurar y conservar respaldo", Btn::Primary, free, px(265))) {
+                            app.accounts->restore_cloud_save(*save);
+                            app.account_confirm_restore.clear();
+                        }
+                    } else if (button("Recuperar copia remota", Btn::Secondary, free, px(190))) {
+                        app.account_confirm_restore = save->work;
+                    }
+                }
+            }
             const auto* support = mods::game_support(game.manifest.game_id);
             if (support && support->proven) {
                 ImGui::SetCursorPosX(px(22));
@@ -1049,7 +1096,18 @@ void game_page(App& app, Game& g, float width) {
         // Sin instalar: la acción principal es instalar (con el instalador incluido en el paquete).
         if (button("Instalar", Btn::Primary, true, px(150))) open_legacy_launcher(app, g, g_window);
     } else if (button("  Jugar  ", Btn::Primary, ready && !running && !g.preparing, px(150), why)) {
-        launch_modded(g, g.adapter->offline(g.root));
+        const auto view = app.accounts->view();
+        if (!view.identity_ready && mods::game_support(g.manifest.game_id)) {
+            set_message(g, "Comprobando el perfil local de la cuenta. Vuelve a pulsar Jugar.", false);
+        } else {
+            auto save = app.accounts->local_save(g.manifest.game_id, g.root, s);
+            if (save && !account::save_location_enabled(*save)) save.reset();
+            if (save && view.save_locked) {
+                set_message(g, "Espera a que se complete la restauración del guardado.", false);
+            } else {
+                launch_modded(g, g.adapter->offline(g.root), {}, std::move(save));
+            }
+        }
     }
     bool wfc = m.has("lan_wfc");
     if (!wfc) {
@@ -2208,6 +2266,13 @@ int main(int argc, char** argv) {
             redraw = std::max(redraw, 1);
         }
         app.updates->pump();
+        const auto owner = app.accounts->view().local_owner;
+        for (const auto& game : app.games) {
+            std::lock_guard<std::mutex> lock(game->mutex);
+            if (game->completed_account_save && game->completed_account_save->owner == owner &&
+                app.accounts->synchronize_save(*game->completed_account_save))
+                game->completed_account_save.reset();
+        }
         if (g_minimize_launcher.exchange(false)) SDL_MinimizeWindow(window);   // el juego no pudo pasar al frente
         if (app.ready_pending && app.room && app.mods) {
             const auto ms = app.mods->snapshot();

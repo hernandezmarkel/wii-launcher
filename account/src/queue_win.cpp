@@ -132,7 +132,7 @@ bool read(const fs::path& file, const std::string& owner, Pending& saved, std::s
     const auto when = json["retry_at"].num(-1);
     const auto terminal = json["terminal"].str();
     if (size <= 0 || size > static_cast<int64_t>(kMaxSaveBytes) || retries < 0 || retries > 20 || when < 0 ||
-        (terminal != "" && terminal != "conflict" && terminal != "rejected"))
+        (terminal != "" && terminal != "conflict" && terminal != "rejected" && terminal != "uploaded"))
         return failure(error, "La copia pendiente tiene metadatos no válidos.");
     const auto id = json["id"].str();
     if (file.stem().u8string() != id) return failure(error, "La revisión pendiente no coincide con su archivo.");
@@ -162,7 +162,14 @@ bool SaveQueue::enqueue(const SaveRevision& revision, const SaveBundle& bundle, 
     if (!lock) return failure(error, "Ya hay una operación de sincronización en curso.");
     size_t count = 0;
     for (fs::directory_iterator it(directory_, ec), end; !ec && it != end; it.increment(ec)) {
-        if (it->path().extension() == ".pending") ++count;
+        if (it->path().extension() != ".pending") continue;
+        ++count;
+        Pending existing;
+        if (!read(it->path(), owner_, existing, error)) return false;
+        const auto& old = existing.revision;
+        if (old.game_id == revision.game_id && old.slot_id == revision.slot_id &&
+            old.parent_id == revision.parent_id && old.sha256 == revision.sha256 && old.compatibility == revision.compatibility)
+            return true;
     }
     if (ec || count >= kMaxQueued) return failure(error, "La cola local de guardados está llena o no se puede leer.");
     const auto file = directory_ / (revision.revision_id + ".pending");
@@ -190,6 +197,8 @@ QueueResult SaveQueue::process_next(CloudClient& cloud, const Session& session, 
         if (it->path().extension() != ".pending") continue;
         Pending saved;
         if (!read(it->path(), owner_, saved, error)) return {};
+        if (saved.terminal == "uploaded")
+            return {QueueState::Uploaded, saved.revision.revision_id, saved.revision.sha256};
         if (!saved.terminal.empty()) {
             const auto state = saved.terminal == "conflict" ? QueueState::Conflict : QueueState::Rejected;
             if (unresolved.state != QueueState::Conflict) unresolved = {state, saved.revision.revision_id};
@@ -204,11 +213,9 @@ QueueResult SaveQueue::process_next(CloudClient& cloud, const Session& session, 
 
         const auto id = r.revision_id;
         if (state == SaveState::Ok) {
-            if (!fs::remove(it->path(), ec) || ec) {
-                failure(error, "La revisión está subida. La cola se revalidará al reintentar.");
-                return {QueueState::Deferred, id};
-            }
-            return {QueueState::Uploaded, id};
+            saved.terminal = "uploaded";
+            if (!persist(it->path(), owner_, saved, true, error)) return {QueueState::Deferred, id};
+            return {QueueState::Uploaded, id, r.sha256};
         }
 
         QueueState result = QueueState::Rejected;
@@ -230,6 +237,19 @@ QueueResult SaveQueue::process_next(CloudClient& cloud, const Session& session, 
         return {};
     }
     return deferred ? QueueResult{QueueState::Deferred, {}} : unresolved;
+}
+
+bool SaveQueue::acknowledge(const std::string& revision_id, std::string& error) {
+    error.clear();
+    if (directory_.empty() || !valid_user_id(revision_id)) return failure(error, "La revisión no es válida.");
+    const QueueLock lock(directory_);
+    if (!lock) return failure(error, "Ya hay una operación de sincronización en curso.");
+    const auto path = directory_ / (revision_id + ".pending");
+    Pending saved;
+    if (!read(path, owner_, saved, error) || saved.terminal != "uploaded")
+        return failure(error, "La revisión aún no se ha confirmado en la nube.");
+    std::error_code ec;
+    return (fs::remove(path, ec) && !ec) || failure(error, "No se pudo confirmar el avance de la cola local.");
 }
 
 }  // namespace wl::account

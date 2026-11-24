@@ -2,6 +2,9 @@
 #include "wl/account/cloud.h"
 #include "wl/account/queue.h"
 #include "wl/account/save.h"
+#include "wl/account/service.h"
+#include "wl/mods/safe_path.h"
+#include "wl/process.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -10,6 +13,11 @@
 #include <iostream>
 #include <thread>
 #include "wl/mods/json.h"
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 using namespace wl;
 using namespace wl::account;
@@ -92,6 +100,10 @@ void unit_tests() {
     CHECK(a.save("refresh_rotated", error));
     CHECK(a.load(token, error) && token == "refresh_rotated");
     CHECK(a.clear(error) && a.load(token, error) && token.empty());
+    std::string cached;
+    CHECK(a.save("refresh_cached", error, kUser));
+    CHECK(a.load(token, error, &cached) && token == "refresh_cached" && cached == kUser);
+    CHECK(a.clear(error));
 }
 
 void save_tests() {
@@ -131,6 +143,20 @@ void save_tests() {
         CHECK(!restore_save(b, closed, traversal, error));
     }
     CHECK(snapshot_save(b, closed, copy, error) && source.sha256 == copy.sha256);
+    const auto owner_a = new_id(), owner_b = new_id();
+    const auto local_a = save_location(root, owner_a, "mp9", a_root, install);
+    const auto local_b = save_location(root, owner_b, "mp9", a_root, install);
+    CHECK(local_a && local_b && local_a->nand != local_b->nand && !save_location_enabled(*local_b));
+    if (local_a) {
+        CHECK(enable_save_location(*local_a));
+        LaunchSpec vanilla, modded;
+        modded.args = {"disco-virtual"};
+        CHECK(launch_with_save_location(vanilla, *local_a, closed, error) && vanilla.args.size() == 3 &&
+              vanilla.args.front() == "games/mp9/extracted");
+        CHECK(launch_with_save_location(modded, *local_a, closed, error) && modded.args.size() == 3 &&
+              modded.args.front() == "disco-virtual" && modded.args.back() == vanilla.args.back());
+        CHECK(!fs::exists(local_a->target.directory) && fs::exists(a.directory / "slots" / "save.bin"));
+    }
     const auto pending = b.directory.parent_path() / ".wl-save-restore";
     fs::create_directories(pending);
     fs::rename(b.directory, pending / "previous"); // interrupción entre las dos operaciones de cambio
@@ -334,6 +360,53 @@ void live_recovery(upd::HttpClient& http, AuthClient& auth, const std::string& e
     if (!failures) std::cout << "Recuperación real por código SMTP local verificada.\n";
 }
 
+
+void live_service(const Config& cfg, const std::string& email, const std::string& owner) {
+    const auto root = scratch();
+    const auto settled = [](const AccountService& service) {
+        for (int i = 0; i < 280; ++i) {
+            if (!service.view().busy) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        return false;
+    };
+    AccountService a(cfg, root / "desktop", {}), b(cfg, root / "laptop", {});
+    if (!settled(a) || !settled(b)) { CHECK(false); return; }
+    a.sign_in(email, kPassword, false);
+    b.sign_in(email, kPassword, false);
+    if (!settled(a) || !settled(b)) { CHECK(false); return; }
+    CHECK(a.view().local_owner == owner && b.view().local_owner == owner);
+    InstallStatus status;
+    status.folder = status.built = status.disc_ok = true;
+    status.disc_id = "SUPP01";
+    status.revision = "fixture";
+    const auto install = root / "game";
+    fs::create_directories(install);
+    const auto local_a = a.local_save("wiiparty", install, status);
+    const auto local_b = b.local_save("wiiparty", install, status);
+    CHECK(local_a && local_b && local_a->work != local_b->work);
+    if (!local_a || !local_b) return;
+    a.enable_save(*local_a);
+    b.enable_save(*local_b);
+    CHECK(settled(a) && settled(b) && save_location_enabled(*local_a) && save_location_enabled(*local_b));
+    fs::create_directories(local_a->target.directory);
+    {
+        std::ofstream fixture(local_a->target.directory / "service-fixture.bin");
+        fixture << "progreso del servicio de cuenta";
+        CHECK(fixture.good());
+    }
+    CHECK(a.synchronize_save(*local_a) && settled(a) && !a.view().warning);
+    if (a.view().warning) std::cerr << a.view().message << '\n';
+    b.restore_cloud_save(*local_b);
+    CHECK(settled(b) && !b.view().warning);
+    if (b.view().warning) std::cerr << b.view().message << '\n';
+    std::ifstream restored(local_b->target.directory / "service-fixture.bin");
+    const std::string data{std::istreambuf_iterator<char>(restored), {}};
+    CHECK(data == "progreso del servicio de cuenta");
+    b.sign_out();
+    CHECK(settled(b) && b.view().local_owner.empty() && fs::exists(local_b->target.directory / "service-fixture.bin"));
+}
+
 int live() {
     auto cfg = Config::from_environment();
     if (!cfg.valid() || cfg.origin.rfind("http://127.0.0.1:", 0) != 0) return 2;
@@ -392,6 +465,7 @@ int live() {
     CHECK(second_device.ok() && second_device.session.user_id == renewed.session.user_id);
     if (second_device.ok()) live_saves(*http_a, *http_b, cfg, renewed.session, second_device.session, b1.session);
     if (second_device.ok()) live_mods(*http_a, *http_b, cfg, renewed.session, second_device.session, b1.session);
+    live_service(cfg, email_a, renewed.session.user_id);
     if (second_device.ok()) CHECK(b.sign_out(second_device.session.access_token).ok());
 
     CHECK(a.sign_out(renewed.session.access_token).ok() && vault.clear(error));
@@ -402,9 +476,48 @@ int live() {
     return failures ? 1 : 0;
 }
 
+
+int port_smoke(const fs::path& root) {
+    if (!mods::is_within(fs::temp_directory_path(), root) ||
+        !fs::is_regular_file(root / ".account-port-fixture") || game_process_running("mp9")) return 2;
+
+    const auto manifest = load_manifest((fs::u8path(WL_MANIFEST_DIR) / "mp9.toml").u8string());
+    if (!manifest.ok) return 2;
+    const auto adapter = make_adapter(manifest.manifest);
+    const auto install = adapter->probe(root);
+    const auto location = save_location(root / "account-data", new_id(), "mp9", root, install);
+    if (!location || !enable_save_location(*location)) return 2;
+    auto spec = adapter->offline(root);
+    std::string error;
+    if (!launch_with_save_location(spec, *location, [] { return game_process_running("mp9"); }, error)) return 2;
+    spec.env["WP_HEADLESS"] = "1";
+    spec.env["WP_LOG_FILE"] = (root / "port-smoke.log").u8string();
+    const auto process = spawn(spec);
+    if (!process.ok) return 2;
+    HANDLE handle = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, static_cast<DWORD>(process.pid));
+    if (!handle) return 2;
+    bool mounted = false;
+    for (int i = 0; i < 120 && WaitForSingleObject(handle, 100) == WAIT_TIMEOUT; ++i) {
+        if (fs::is_directory(location->target.directory) &&
+            fs::is_regular_file(location->nand / "shared2" / "sys" / "SYSCONF")) {
+            mounted = true;
+            break;
+        }
+    }
+    if (WaitForSingleObject(handle, 0) == WAIT_TIMEOUT) {
+        TerminateProcess(handle, 0);
+        WaitForSingleObject(handle, 3000);
+    }
+    CloseHandle(handle);
+    CHECK(mounted && !fs::exists(root / "games" / "mp9" / "nand"));
+    if (!failures) std::cout << "MP9 real arrancó y montó la NAND aislada de la cuenta.\n";
+    return failures ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--port-smoke") return port_smoke(fs::u8path(argv[2]));
     if (argc == 2 && std::string(argv[1]) == "--live") return live();
     unit_tests();
     save_tests();
