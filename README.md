@@ -31,6 +31,9 @@ Los mods de datos están disponibles en Wii Party y Mario Party 9. La
 [guía de integración](docs/mods/04-integracion_juegos.md) recoge los formatos y
 [el estado del gestor](docs/mods/estado_y_bloqueos.md) enlaza las pruebas y el contrato de cuenta.
 
+La función de cuenta de la beta.8 necesita un proyecto Supabase con las migraciones del repositorio.
+La configuración de prueba y la lista de verificaciones están en la [guía de cuentas](docs/account-sync/NEXT_STEPS.md).
+
 ## Compilar
 
 Requisitos: CMake ≥ 3.20, Ninja y MinGW-w64 g++ (probado con GCC 15.2). En CI se usa MSYS2 UCRT64.

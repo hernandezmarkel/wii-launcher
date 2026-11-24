@@ -6,6 +6,12 @@ solo una etiqueta `vX.Y.Z` aprobada publica algo.
 
 ## [Sin publicar]
 
+## [1.0.0-beta.8] - 2026-11-24
+
+- Cuenta en pruebas: registro, inicio de sesión, recuperación por código y alias. Para habilitarla, configura un proyecto Supabase compatible mediante WL_SUPABASE_URL y WL_SUPABASE_PUBLISHABLE_KEY. La instalación estándar permite jugar como invitado.
+- Mario Party 9 y Wii Party pueden usar un guardado separado por cuenta al jugar sin conexión. La cola reintenta las subidas y conserva ambas revisiones si dos equipos avanzan por separado.
+- Desde Cuenta puedes consultar el historial, recuperar una revisión con respaldo, exportar una copia local y comparar referencias de mods entre instalaciones.
+
 ## [1.0.0-beta.7] - 2026-11-23
 
 - Mario Party 9 abre el juego para el anfitrión al pulsar «Empezar» desde la sala, con o sin mods.
