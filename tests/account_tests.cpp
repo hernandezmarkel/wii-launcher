@@ -1,11 +1,15 @@
 #include "wl/account/auth.h"
 #include "wl/account/cloud.h"
+#include "wl/account/queue.h"
 #include "wl/account/save.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <thread>
+#include "wl/mods/json.h"
 
 using namespace wl;
 using namespace wl::account;
@@ -206,6 +210,128 @@ void live_saves(upd::HttpClient& http_a, upd::HttpClient& http_b, const Config& 
     result = http_b.perform(request);
     CHECK(result.status == 200 && result.body == "[]");
     CHECK(desktop.pull(a, local_a, first_rev.revision_id, incoming) == SaveState::Ok && incoming.bytes == first.bytes);
+
+    class DropCommit final : public upd::HttpClient {
+    public:
+        upd::HttpClient& real;
+        bool dropped = false;
+        explicit DropCommit(upd::HttpClient& transport) : real(transport) {}
+        upd::HttpResponse get(const upd::HttpRequest& request) override { return real.get(request); }
+        upd::HttpResponse perform(const upd::HttpRequest& request) override {
+            if (!dropped && request.url.find("/rpc/account_commit_save") != request.url.npos) {
+                dropped = true;
+                return {};
+            }
+            return real.perform(request);
+        }
+    } interrupted(http_a);
+
+    const auto queue_root = root / "pending";
+    const auto queued_rev = make_revision(left, winner, device_a);
+    {
+        SaveQueue queue(queue_root, a.user_id);
+        CloudClient connection(interrupted, cfg);
+        CHECK(queue.enqueue(queued_rev, left, error));
+        CHECK(queue.process_next(connection, other_user, 1000, error).state == QueueState::Rejected);
+        CHECK(queue.process_next(connection, a, 1000, error).state == QueueState::Deferred && interrupted.dropped);
+        CHECK(desktop.head(a, local_a).revision_id == winner);
+    }
+    SaveQueue restarted(queue_root, a.user_id);
+    CHECK(restarted.process_next(desktop, a, 1003, error).state == QueueState::Deferred);
+    CHECK(restarted.process_next(desktop, a, 1010, error).state == QueueState::Uploaded);
+    CHECK(desktop.head(a, local_a).revision_id == queued_rev.revision_id);
+    CHECK(laptop.pull(same_user_on_b, local_b, queued_rev.revision_id, incoming) == SaveState::Ok && incoming.bytes == left.bytes);
+}
+
+
+void live_mods(upd::HttpClient& http_a, upd::HttpClient& http_b, const Config& cfg,
+               const Session& a, const Session& same_user_on_b, const Session& other_user) {
+    using mods::Json;
+    CloudClient desktop(http_a, cfg), laptop(http_b, cfg);
+    Json catalog = Json::object(), refs = Json::array();
+    catalog.set("schema", "wii-launcher-mod-catalog");
+    catalog.set("version", 1);
+    catalog.set("game_id", "mp9");
+    catalog.set("profile", "fixture");
+    catalog.set("base_content_id", "fixture-disc");
+    catalog.set("loader", "fixture-loader");
+    for (int i = 0; i < 3; ++i) {
+        mods::ModReference ref;
+        ref.id = i == 0 ? "manual.fixture" : "gamebanana." + std::to_string(i);
+        ref.source = i == 0 ? "local" : "gamebanana";
+        ref.source_id = i == 0 ? "" : std::to_string(i);
+        ref.name = "Fixture " + std::to_string(i);
+        ref.version = "1";
+        ref.content_sha256 = upd::sha256_hex(ref.id);
+        ref.config_sha256 = upd::sha256_hex("{}");
+        ref.load_order = i;
+        ref.enabled = i != 1;
+        refs.push(mods::serialize_mod_reference(ref));
+    }
+    catalog.set("mods", refs);
+    CHECK(desktop.mod_catalog(a, "mp9", "fixture").state == SaveState::Missing);
+    auto created = desktop.push_mod_catalog(a, catalog.dump(), 0);
+    CHECK(created.state == SaveState::Ok && created.version == 1);
+    const auto fetched = laptop.mod_catalog(same_user_on_b, "mp9", "fixture");
+    CHECK(fetched.state == SaveState::Ok && fetched.version == 1 && fetched.catalog.mods.size() == 3);
+    if (fetched.catalog.mods.size() == 3) {
+        CHECK(!fetched.catalog.mods[0].downloadable() && fetched.catalog.mods[1].downloadable());
+        CHECK(!fetched.catalog.mods[1].enabled && fetched.catalog.mods[2].load_order == 2);
+    }
+    const auto duplicate = laptop.push_mod_catalog(same_user_on_b, catalog.dump(), 0);
+    CHECK(duplicate.state == SaveState::Conflict && duplicate.version == 1);
+    CHECK(laptop.push_mod_catalog(same_user_on_b, catalog.dump(), 1).version == 2);
+    CHECK(desktop.mod_catalog(a, "mp9", "fixture").version == 2);
+    auto foreign = other_user;
+    foreign.user_id = a.user_id;
+    CHECK(laptop.mod_catalog(foreign, "mp9", "fixture").state == SaveState::Missing);
+}
+
+
+void live_recovery(upd::HttpClient& http, AuthClient& auth, const std::string& email) {
+    const auto mail = std::getenv("WL_AUTH_TEST_MAIL");
+    if (!mail) return;
+    const std::string origin(mail);
+    CHECK((Config{origin, kPublicKey}.valid() && origin.rfind("http://127.0.0.1:", 0) == 0));
+    if (origin.rfind("http://127.0.0.1:", 0) != 0 || !Config{origin, kPublicKey}.valid()) return;
+
+    CHECK(auth.request_recovery(email).ok());
+    const std::string anchor = "Wii Ports recovery code: ";
+    std::string code, ignored;
+    for (int i = 0; i < 25 && code.empty(); ++i) {
+        upd::HttpRequest request;
+        request.url = origin + "/api/v1/messages?limit=50";
+        const auto listed = http.get(request);
+        mods::Json messages;
+        if (listed.status == 200 && mods::parse_json(listed.body, messages, ignored) && messages["messages"].is_array()) {
+            for (const auto& message : messages["messages"].elements()) {
+                bool mine = false;
+                for (const auto& to : message["To"].elements()) mine = mine || to["Address"].str() == email;
+                if (!mine) continue;
+                const auto id = message["ID"].str();
+                if (id.empty() || id.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.") != id.npos)
+                    continue;
+                request.url = origin + "/api/v1/message/" + id;
+                const auto fetched = http.get(request);
+                mods::Json full;
+                if (fetched.status != 200 || !mods::parse_json(fetched.body, full, ignored)) continue;
+                auto body = full["HTML"].str();
+                if (body.empty()) body = full["Text"].str();
+                const auto offset = body.find(anchor);
+                if (offset != body.npos) code = body.substr(offset + anchor.size(), 6);
+            }
+        }
+        if (code.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    }
+    CHECK(code.size() == 6 && code.find_first_not_of("0123456789") == code.npos);
+    if (code.size() != 6) return;
+    const std::string updated = "FixtureRecuperada52!ConCorreo";
+    CHECK(auth.reset_password(email, code, updated).ok());
+    CHECK(!auth.sign_in(email, kPassword).ok());
+    const auto recovered = auth.sign_in(email, updated);
+    CHECK(recovered.ok());
+    if (recovered.ok()) CHECK(auth.sign_out(recovered.session.access_token).ok());
+    if (!failures) std::cout << "Recuperación real por código SMTP local verificada.\n";
 }
 
 int live() {
@@ -265,11 +391,13 @@ int live() {
     auto second_device = b.sign_in(email_a, kPassword);
     CHECK(second_device.ok() && second_device.session.user_id == renewed.session.user_id);
     if (second_device.ok()) live_saves(*http_a, *http_b, cfg, renewed.session, second_device.session, b1.session);
+    if (second_device.ok()) live_mods(*http_a, *http_b, cfg, renewed.session, second_device.session, b1.session);
     if (second_device.ok()) CHECK(b.sign_out(second_device.session.access_token).ok());
 
     CHECK(a.sign_out(renewed.session.access_token).ok() && vault.clear(error));
     CHECK(!a.refresh(renewed.session.refresh_token).ok());
     CHECK(b.sign_out(b1.session.access_token).ok());
+    live_recovery(*http_b, b, email_b);
     if (!failures) std::cout << "Supabase real local: cuentas A/B, sesión, RLS, Storage y conflicto de guardados correctos.\n";
     return failures ? 1 : 0;
 }
