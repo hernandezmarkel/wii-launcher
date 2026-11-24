@@ -7,6 +7,7 @@
 #include "wl/process.h"
 
 #include <chrono>
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <future>
@@ -104,6 +105,16 @@ void unit_tests() {
     CHECK(a.save("refresh_cached", error, kUser));
     CHECK(a.load(token, error, &cached) && token == "refresh_cached" && cached == kUser);
     CHECK(a.clear(error));
+
+    Config disconnected{"http://127.0.0.1:1", kPublicKey};
+    const auto account_root = root / "offline";
+    SessionVault offline(account_root / upd::sha256_hex(disconnected.origin).substr(0, 24) / "session.dat", disconnected.origin);
+    CHECK(offline.save("fixture_refresh_disconnected", error, kUser));
+    AccountService restarted(disconnected, account_root, {});
+    for (int i = 0; i < 100 && !restarted.view().identity_ready; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const auto offline_view = restarted.view();
+    CHECK(offline_view.identity_ready && offline_view.signed_in && offline_view.local_owner == kUser);
 }
 
 void save_tests() {
@@ -206,6 +217,12 @@ void live_saves(upd::HttpClient& http_a, upd::HttpClient& http_b, const Config& 
     const auto head = desktop.head(a, local_a);
     const auto winner = a_result.state == SaveState::Ok ? left_rev.revision_id : right_rev.revision_id;
     CHECK(head.state == SaveState::Ok && head.revision_id == winner && head.version == 2);
+    const auto history = laptop.history(same_user_on_b, local_b);
+    const auto has = [&](const std::string& id) {
+        return std::any_of(history.revisions.begin(), history.revisions.end(), [&](const auto& record) { return record.id == id; });
+    };
+    CHECK(history.state == SaveState::Ok && history.revisions.size() == 3 &&
+          has(left_rev.revision_id) && has(right_rev.revision_id));
     CHECK(laptop.pull(same_user_on_b, local_b, left_rev.revision_id, incoming) == SaveState::Ok && incoming.bytes == left.bytes);
     CHECK(desktop.pull(a, local_a, right_rev.revision_id, incoming) == SaveState::Ok && incoming.bytes == right.bytes);
     CHECK(desktop.push(a, left_rev, left).state == a_result.state);
@@ -403,6 +420,24 @@ void live_service(const Config& cfg, const std::string& email, const std::string
     std::ifstream restored(local_b->target.directory / "service-fixture.bin");
     const std::string data{std::istreambuf_iterator<char>(restored), {}};
     CHECK(data == "progreso del servicio de cuenta");
+    restored.close();
+    b.export_local_save(*local_b);
+    CHECK(settled(b) && !b.view().warning && fs::is_directory(local_b->work / "exports"));
+    std::ofstream(local_a->target.directory / "service-fixture.bin", std::ios::app) << " actualizado";
+    CHECK(a.synchronize_save(*local_a) && settled(a) && !a.view().warning);
+    b.list_cloud_saves(*local_b);
+    CHECK(settled(b) && b.view().save_history.size() == 2);
+    const auto history = b.view().save_history;
+    const auto first = std::find_if(history.begin(), history.end(), [](const auto& item) { return item.parent.empty(); });
+    if (first != history.end()) {
+        b.restore_cloud_save(*local_b, first->id);
+        CHECK(settled(b) && !b.view().warning);
+        std::ifstream historic(local_b->target.directory / "service-fixture.bin");
+        const std::string original{std::istreambuf_iterator<char>(historic), {}};
+        CHECK(original == data);
+    } else {
+        CHECK(false);
+    }
     b.sign_out();
     CHECK(settled(b) && b.view().local_owner.empty() && fs::exists(local_b->target.directory / "service-fixture.bin"));
 }
@@ -449,6 +484,10 @@ int live() {
     access.headers = {{"apikey", cfg.public_key},{"Authorization", "Bearer " + renewed.session.access_token}};
     auto denied = http_a->perform(access);
     CHECK(denied.status == 200 && denied.body == "[]");
+    auto public_read = access;
+    public_read.headers.pop_back();
+    const auto anonymous = http_a->perform(public_read);
+    CHECK(anonymous.status == 401 || anonymous.status == 403);
     access.url = cfg.origin + "/rest/v1/account_profiles?user_id=eq." + b1.session.user_id;
     access.method = "PATCH";
     access.headers.emplace_back("Content-Type", "application/json");

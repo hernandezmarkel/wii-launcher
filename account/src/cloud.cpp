@@ -172,6 +172,29 @@ SaveState CloudClient::pull(const Session& session, const SaveTarget& target, co
 }
 
 
+
+HistoryResult CloudClient::history(const Session& session, const SaveTarget& target) {
+    if (!config_.valid() || !valid_access(session) || !valid_target(target)) return {};
+    const auto response = send(session, "GET",
+        "/rest/v1/account_save_revisions?select=revision_id,parent_revision_id,byte_size,compatibility" +
+        filters(session, target) + "&compatibility=eq." + target.compatibility + "&order=created_at.desc&limit=25", {});
+    const auto state = classify(response);
+    if (state != SaveState::Ok) return {state, {}};
+    Json rows;
+    if (!parse(response, rows) || !rows.is_array() || rows.size() > 25) return {};
+    HistoryResult result{SaveState::Ok, {}};
+    for (const auto& row : rows.elements()) {
+        const auto id = row["revision_id"].str();
+        const auto parent = row["parent_revision_id"].str();
+        const auto size = row["byte_size"].num();
+        if (!valid_user_id(id) || (!parent.empty() && !valid_user_id(parent)) || size <= 0 ||
+            size > static_cast<int64_t>(kMaxSaveBytes)) return {};
+        if (row["compatibility"].str() == target.compatibility)
+            result.revisions.push_back({id, parent, static_cast<size_t>(size)});
+    }
+    return result;
+}
+
 CatalogResult CloudClient::mod_catalog(const Session& session, const std::string& game, const std::string& profile) {
     if (!config_.valid() || !valid_access(session) || !catalog_coordinates(game, profile)) return {};
     const auto response = send(session, "GET", "/rest/v1/account_mod_profiles?select=version,catalog,sha256&user_id=eq." +

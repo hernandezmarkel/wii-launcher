@@ -54,8 +54,8 @@ jobs:
           cmake --build build -j 4
           echo "Compilación del launcher: $(( $(date +%s) - start )) s" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Tests (contrato, adaptadores y updater)
-        run: ./build/wl_tests.exe
+      - name: Tests de launcher y cuentas
+        run: ctest --test-dir build --output-on-failure
 
       - name: Empaquetar (artefacto interno de CI, no es una actualización)
         run: bash tools/empaquetar.sh build dist-ci

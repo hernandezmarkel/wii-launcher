@@ -4,6 +4,7 @@
 #include "wl/account/location.h"
 
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -19,6 +20,8 @@ struct AccountView {
     std::string local_owner;
     std::string alias;
     std::string message;
+    fs::path history_location;
+    std::vector<RevisionSummary> save_history;
 };
 
 class AccountService {
@@ -37,7 +40,10 @@ public:
                                            const InstallStatus& status) const;
     void enable_save(SaveLocation location);
     bool synchronize_save(SaveLocation location);
-    void restore_cloud_save(SaveLocation location);
+    bool resume_save_queue(SaveLocation location);
+    void list_cloud_saves(SaveLocation location);
+    void export_local_save(SaveLocation location);
+    void restore_cloud_save(SaveLocation location, std::string revision_id = {});
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -48,6 +54,9 @@ private:
     void accept(AuthResult result);
     void feedback(std::string message, bool warning);
     void account(bool signed_in, std::string alias = {});
+    void upload_save_queue(const SaveLocation& location);
+    void retry_save_uploads();
+    void defer_save_upload(const SaveLocation& location);
 
     std::unique_ptr<upd::HttpClient> http_;
     AuthClient client_;
@@ -64,6 +73,8 @@ private:
     // Solo se accede desde el hilo de cuentas.
     Session session_;
     Clock::time_point next_refresh_ = Clock::time_point::max();
+    Clock::time_point next_save_retry_ = Clock::time_point::max();
+    std::map<fs::path, SaveLocation> save_retries_;
     std::chrono::seconds backoff_{5};
     std::thread worker_;
 };

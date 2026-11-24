@@ -125,6 +125,19 @@ bool write_save_baseline(const SaveLocation& location, const SaveBaseline& data)
            write_record(location.work / "baseline", data.revision + "\n" + data.sha256, true);
 }
 
+fs::path export_save_bundle(const SaveLocation& location, const SaveBundle& bundle) {
+    if (!save_location_enabled(location) || bundle.bytes.empty() || bundle.bytes.size() > kMaxSaveBytes ||
+        !valid_digest(bundle.sha256) || upd::sha256_hex(bundle.bytes) != bundle.sha256) return {};
+    const auto dir = location.work / "exports";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec || !safe_file(dir, true)) return {};
+    const auto id = new_id();
+    if (id.empty()) return {};
+    const auto file = dir / (location.target.game_id + "-" + id + ".wlsave");
+    return write_record(file, "WL-EXPORT-1\n" + bundle.sha256 + "\n" + bundle.bytes, false) ? file : fs::path{};
+}
+
 std::string load_device_id(const fs::path& account_root) {
     const auto file = account_root / "device.id";
     std::string value;

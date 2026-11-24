@@ -195,6 +195,7 @@ struct Game {
     std::atomic<bool> preparing{false};   // preparando el disco virtual de los mods antes de lanzar
     std::atomic<bool> end_session_on_exit{false};   // partida online con perfil de sesión: volver al habitual al cerrar
     std::optional<account::SaveLocation> completed_account_save;
+    bool account_queue_checked = false;
     std::string message;
     bool message_bad = false;
     // Online con servidor en la LAN (lan_wfc): IP del anfitrión que se escribe en la configuración del juego.
@@ -218,6 +219,8 @@ struct App {
     bool account_recovery = false;
     fs::path account_confirm_enable;
     fs::path account_confirm_restore;
+    std::string account_save_revision;
+    std::string account_queue_owner;
     std::unique_ptr<RoomSession> room;
     int room_game = -1;
     char name[32] = {};
@@ -827,6 +830,7 @@ void account_page(App& app, float width) {
             app.account_email[0] = '\0';
             app.account_confirm_enable.clear();
             app.account_confirm_restore.clear();
+            app.account_save_revision.clear();
         }
         if (!app.games.empty()) {
             auto& game = *app.games[app.selected];
@@ -853,16 +857,40 @@ void account_page(App& app, float width) {
                         app.account_confirm_enable = save->work;
                     }
                 } else {
+                    const bool local_history = view.history_location == save->work;
                     if (button("Sincronizar guardado", Btn::Secondary, free, px(180)))
                         app.accounts->synchronize_save(*save);
                     ImGui::SameLine();
                     if (app.account_confirm_restore == save->work) {
                         if (button("Restaurar y conservar respaldo", Btn::Primary, free, px(265))) {
-                            app.accounts->restore_cloud_save(*save);
+                            app.accounts->restore_cloud_save(*save, local_history ? app.account_save_revision : std::string{});
                             app.account_confirm_restore.clear();
                         }
                     } else if (button("Recuperar copia remota", Btn::Secondary, free, px(190))) {
                         app.account_confirm_restore = save->work;
+                    }
+                    ImGui::SetCursorPosX(px(22));
+                    if (button("Ver historial", Btn::Ghost, true, px(150))) {
+                        app.accounts->list_cloud_saves(*save);
+                        app.account_save_revision.clear();
+                        app.account_confirm_restore.clear();
+                    }
+                    ImGui::SameLine();
+                    if (button("Exportar copia", Btn::Ghost, free, px(150)))
+                        app.accounts->export_local_save(*save);
+                    if (local_history && !view.save_history.empty()) {
+                        ImGui::SetCursorPosX(px(22));
+                        ImGui::BeginChild("##save-history", ImVec2(width - px(44), px(118)), ImGuiChildFlags_Borders);
+                        for (const auto& revision : view.save_history) {
+                            const auto parent = revision.parent.empty() ? "primera copia" : "desde " + revision.parent.substr(0, 8);
+                            const auto label = revision.id.substr(0, 8) + " · " + parent + " · " +
+                                               std::to_string(revision.byte_size) + " bytes##" + revision.id;
+                            if (ImGui::Selectable(label.c_str(), app.account_save_revision == revision.id)) {
+                                app.account_save_revision = revision.id;
+                                app.account_confirm_restore.clear();
+                            }
+                        }
+                        ImGui::EndChild();
                     }
                 }
             }
@@ -2267,11 +2295,20 @@ int main(int argc, char** argv) {
         }
         app.updates->pump();
         const auto owner = app.accounts->view().local_owner;
+        if (owner != app.account_queue_owner) {
+            app.account_queue_owner = owner;
+            for (const auto& game : app.games) game->account_queue_checked = false;
+        }
         for (const auto& game : app.games) {
             std::lock_guard<std::mutex> lock(game->mutex);
             if (game->completed_account_save && game->completed_account_save->owner == owner &&
                 app.accounts->synchronize_save(*game->completed_account_save))
                 game->completed_account_save.reset();
+            if (!owner.empty() && game->status.ready() && !game->account_queue_checked) {
+                const auto location = app.accounts->local_save(game->manifest.game_id, game->root, game->status);
+                game->account_queue_checked = !location || !account::save_location_enabled(*location) ||
+                                              app.accounts->resume_save_queue(*location);
+            }
         }
         if (g_minimize_launcher.exchange(false)) SDL_MinimizeWindow(window);   // el juego no pudo pasar al frente
         if (app.ready_pending && app.room && app.mods) {

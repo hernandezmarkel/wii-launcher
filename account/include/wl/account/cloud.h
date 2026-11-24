@@ -26,6 +26,16 @@ struct CatalogResult {
     mods::ProfileCatalog catalog;
 };
 
+struct RevisionSummary {
+    std::string id, parent;
+    size_t byte_size = 0;
+};
+
+struct HistoryResult {
+    SaveState state = SaveState::Rejected;
+    std::vector<RevisionSummary> revisions;
+};
+
 std::string new_id();
 
 class CloudClient {
@@ -34,6 +44,7 @@ public:
     HeadResult head(const Session& session, const SaveTarget& target);
     HeadResult push(const Session& session, const SaveRevision& revision, const SaveBundle& bundle);
     SaveState pull(const Session& session, const SaveTarget& target, const std::string& revision_id, SaveBundle& out);
+    HistoryResult history(const Session& session, const SaveTarget& target);
     CatalogResult mod_catalog(const Session& session, const std::string& game, const std::string& profile);
     CatalogResult push_mod_catalog(const Session& session, const std::string& catalog, int64_t expected_version);
 
