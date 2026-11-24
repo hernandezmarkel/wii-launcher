@@ -34,6 +34,7 @@
 #include "mods_service.h"
 #include "prefs.h"
 #include "update_service.h"
+#include "wl/account/service.h"
 #include "wl/catalog.h"
 #include "wl/mods/launch.h"
 #include "wl/mods/lobby_mods.h"
@@ -193,6 +194,8 @@ struct Game {
     std::atomic<long long> running_pid{0};
     std::atomic<bool> preparing{false};   // preparando el disco virtual de los mods antes de lanzar
     std::atomic<bool> end_session_on_exit{false};   // partida online con perfil de sesión: volver al habitual al cerrar
+    std::optional<account::SaveLocation> completed_account_save;
+    bool account_queue_checked = false;
     std::string message;
     bool message_bad = false;
     // Online con servidor en la LAN (lan_wfc): IP del anfitrión que se escribe en la configuración del juego.
@@ -200,7 +203,7 @@ struct Game {
     bool lan_loaded = false;
 };
 
-enum class Page { Game, Room, Launcher, Mods };
+enum class Page { Game, Room, Launcher, Mods, Account };
 
 struct App {
     std::vector<std::unique_ptr<Game>> games;
@@ -208,9 +211,20 @@ struct App {
     int selected = 0;
     Page page = Page::Game;
     Prefs prefs;
+    std::unique_ptr<account::AccountService> accounts;
+    char account_email[255] = {};
+    char account_password[256] = {};
+    char account_code[7] = {};
+    char account_alias[25] = {};
+    bool account_recovery = false;
+    fs::path account_confirm_enable;
+    fs::path account_confirm_restore;
+    std::string account_save_revision;
+    std::string account_queue_owner;
     std::unique_ptr<RoomSession> room;
     int room_game = -1;
     char name[32] = {};
+    bool room_name_from_account = false;
     char address[64] = {};
     int port = 0;
     int start_option = 1;
@@ -333,7 +347,7 @@ void bring_game_to_front(long long pid) {
 #endif
 }
 
-void launch(Game& g, const LaunchSpec& spec) {
+void launch(Game& g, const LaunchSpec& spec, std::optional<account::SaveLocation> account_save = {}) {
     if (g.running_pid.load() != 0) {
         set_message(g, "El juego ya está abierto.", false);
         return;
@@ -349,13 +363,14 @@ void launch(Game& g, const LaunchSpec& spec) {
     g.running_pid = p.pid;
     bring_game_to_front(p.pid);
     // Un hilo espera a que el juego termine; la UI no se bloquea.
-    std::thread([&g, pid = p.pid] {
+    std::thread([&g, pid = p.pid, account_save = std::move(account_save)] {
         int code = wait_exit(pid, -1);
         if (g.end_session_on_exit.exchange(false)) end_mod_session(g);
         {
             std::lock_guard<std::mutex> lock(g.mutex);
             g.running_pid = 0;
             if (code == 0) {
+                if (account_save) g.completed_account_save = account_save;
                 g.message = "El juego se ha cerrado.";
                 g.message_bad = false;
             } else {
@@ -389,14 +404,15 @@ std::string active_fingerprint(const Game& g, std::string* error = nullptr) {
 // Lanza con el perfil de mods activo. El disco virtual se prepara en un hilo (enlaces y hashes) y solo
 // entonces se abre el juego. `expected`: fingerprint acordado en la sala; si el perfil cambió desde
 // entonces, no se lanza (nunca se juega online con otro conjunto de mods).
-void launch_modded(Game& g, LaunchSpec spec, std::string expected = {}) {
+void launch_modded(Game& g, LaunchSpec spec, std::string expected = {},
+                   std::optional<account::SaveLocation> account_save = {}) {
     if (g.running_pid.load() != 0 || g.preparing.exchange(true)) {
         set_message(g, "El juego ya está abierto o preparándose.", false);
         return;
     }
     set_message(g, "Preparando los mods…", false);
     wake();
-    std::thread([&g, spec, expected]() mutable {
+    std::thread([&g, spec, expected, account_save = std::move(account_save)]() mutable {
         mods::LaunchMods info;
         std::string error;
         bool ok = mods::prepare_launch(g.manifest.game_id, g.root, spec, info, error);
@@ -404,14 +420,18 @@ void launch_modded(Game& g, LaunchSpec spec, std::string expected = {}) {
             ok = false;
             error = "Tus mods han cambiado desde que entraste en la sala: no se abre el juego para no desincronizar la partida.";
         }
-        g.preparing = false;
+        if (ok && account_save) {
+            const auto running = [&] { return account::game_process_running(g.manifest.game_id); };
+            ok = account::launch_with_save_location(spec, *account_save, running, error);
+        }
         if (!ok) {
             set_message(g, "No se puede lanzar con mods: " + error, true);
             if (!expected.empty()) end_mod_session(g);
         } else {
             if (!expected.empty()) g.end_session_on_exit = true;
-            launch(g, spec);
+            launch(g, spec, std::move(account_save));
         }
+        g.preparing = false;
         wake();
     }).detach();
 }
@@ -766,6 +786,169 @@ void update_toast(App& app, const ImVec2& display) {
     ImGui::PopStyleColor(2);
 }
 
+
+void account_page(App& app, float width) {
+    const float x0 = ImGui::GetCursorPosX();
+    ImGui::SetCursorPos(ImVec2(x0, px(34)));
+    if (button("‹ Ajustes", Btn::Ghost, true, px(110))) {
+        app.page = Page::Launcher;
+        return;
+    }
+    ImGui::SetCursorPosX(x0);
+    text(g_semibold, 28, P.text, "Cuenta");
+    const auto view = app.accounts->view();
+    ImGui::SetCursorPosX(x0);
+    if (!view.configured) {
+        text(g_regular, 14, P.dim, "Puedes seguir jugando como invitado. El servicio de cuentas aún no está configurado.", width);
+        return;
+    }
+    if (view.busy) {
+        text(g_regular, 14, P.accent, "Comprobando la cuenta…", width);
+        ImGui::SetCursorPosX(x0);
+    } else if (!view.message.empty()) {
+        text(g_regular, 14, view.warning ? P.warn : P.ok, view.message.c_str(), width);
+        ImGui::SetCursorPosX(x0);
+    }
+
+    ImGui::BeginChild("##account", ImVec2(width, 0), ImGuiChildFlags_AutoResizeY);
+    ImGui::SetCursorPos(ImVec2(px(22), px(18)));
+    ImGui::BeginDisabled(view.busy);
+    if (view.signed_in) {
+        text(g_regular, 14, P.text, view.alias.empty() ? "Añade un alias público a tu perfil." : ("Alias público · " + view.alias).c_str());
+        ImGui::SetCursorPosX(px(22));
+        ImGui::SetNextItemWidth(px(250));
+        ImGui::InputTextWithHint("##alias", "Nuevo alias", app.account_alias, sizeof app.account_alias);
+        ImGui::SetCursorPosX(px(22));
+        if (button("Guardar alias", Btn::Primary, account::valid_alias(app.account_alias), px(140), "Entre 3 y 24 letras sin tildes, números, espacios o guiones.")) {
+            app.accounts->set_alias(app.account_alias);
+            app.account_alias[0] = '\0';
+        }
+        ImGui::SameLine();
+        if (button("Cerrar sesión", Btn::Secondary, true, px(140))) {
+            app.accounts->sign_out();
+            app.account_alias[0] = '\0';
+            app.account_email[0] = '\0';
+            app.account_confirm_enable.clear();
+            app.account_confirm_restore.clear();
+            app.account_save_revision.clear();
+        }
+        if (!app.games.empty()) {
+            auto& game = *app.games[app.selected];
+            InstallStatus status;
+            {
+                std::lock_guard<std::mutex> lock(game.mutex);
+                status = game.status;
+            }
+            const auto save = app.accounts->local_save(game.manifest.game_id, game.root, status);
+            if (save) {
+                const bool free = !game.preparing && !game.running_pid.load();
+                ImGui::SetCursorPosX(px(22));
+                text(g_regular, 13, P.dim, ("Guardado de cuenta · " + game.manifest.display_name).c_str());
+                ImGui::SetCursorPosX(px(22));
+                if (!account::save_location_enabled(*save)) {
+                    if (app.account_confirm_enable == save->work) {
+                        text(g_regular, 13, P.dim, "Se creará un guardado vacío separado para jugar sin conexión.", width - px(44));
+                        ImGui::SetCursorPosX(px(22));
+                        if (button("Confirmar guardado separado", Btn::Primary, free, px(245))) {
+                            app.accounts->enable_save(*save);
+                            app.account_confirm_enable.clear();
+                        }
+                    } else if (button("Activar guardado de cuenta", Btn::Secondary, free, px(235))) {
+                        app.account_confirm_enable = save->work;
+                    }
+                } else {
+                    const bool local_history = view.history_location == save->work;
+                    if (button("Sincronizar guardado", Btn::Secondary, free, px(180)))
+                        app.accounts->synchronize_save(*save);
+                    ImGui::SameLine();
+                    if (app.account_confirm_restore == save->work) {
+                        if (button("Restaurar y conservar respaldo", Btn::Primary, free, px(265))) {
+                            app.accounts->restore_cloud_save(*save, local_history ? app.account_save_revision : std::string{});
+                            app.account_confirm_restore.clear();
+                        }
+                    } else if (button("Recuperar copia remota", Btn::Secondary, free, px(190))) {
+                        app.account_confirm_restore = save->work;
+                    }
+                    ImGui::SetCursorPosX(px(22));
+                    if (button("Ver historial", Btn::Ghost, true, px(150))) {
+                        app.accounts->list_cloud_saves(*save);
+                        app.account_save_revision.clear();
+                        app.account_confirm_restore.clear();
+                    }
+                    ImGui::SameLine();
+                    if (button("Exportar copia", Btn::Ghost, free, px(150)))
+                        app.accounts->export_local_save(*save);
+                    if (local_history && !view.save_history.empty()) {
+                        ImGui::SetCursorPosX(px(22));
+                        ImGui::BeginChild("##save-history", ImVec2(width - px(44), px(118)), ImGuiChildFlags_Borders);
+                        for (const auto& revision : view.save_history) {
+                            const auto parent = revision.parent.empty() ? "primera copia" : "desde " + revision.parent.substr(0, 8);
+                            const auto label = revision.id.substr(0, 8) + " · " + parent + " · " +
+                                               std::to_string(revision.byte_size) + " bytes##" + revision.id;
+                            if (ImGui::Selectable(label.c_str(), app.account_save_revision == revision.id)) {
+                                app.account_save_revision = revision.id;
+                                app.account_confirm_restore.clear();
+                            }
+                        }
+                        ImGui::EndChild();
+                    }
+                }
+            }
+            const auto* support = mods::game_support(game.manifest.game_id);
+            if (support && support->proven) {
+                ImGui::SetCursorPosX(px(22));
+                text(g_regular, 13, P.dim, ("Perfil de mods activo · " + game.manifest.display_name).c_str());
+                ImGui::SetCursorPosX(px(22));
+                if (button("Crear copia de mods", Btn::Secondary, true, px(185)))
+                    app.accounts->sync_mod_catalog(game.manifest.game_id, game.root, true);
+                ImGui::SameLine();
+                if (button("Comparar copia remota", Btn::Secondary, true, px(190)))
+                    app.accounts->sync_mod_catalog(game.manifest.game_id, game.root, false);
+            }
+        }
+    } else {
+        ImGui::SetNextItemWidth(px(290));
+        ImGui::InputTextWithHint("##email", "Correo electrónico", app.account_email, sizeof app.account_email);
+        if (app.account_recovery) {
+            ImGui::SetCursorPosX(px(22));
+            if (button("Enviar código", Btn::Secondary, app.account_email[0], px(150))) app.accounts->request_recovery(app.account_email);
+            ImGui::SetCursorPosX(px(22));
+            ImGui::SetNextItemWidth(px(290));
+            ImGui::InputTextWithHint("##code", "Código de seis dígitos", app.account_code, sizeof app.account_code, ImGuiInputTextFlags_CharsDecimal);
+        }
+        ImGui::SetCursorPosX(px(22));
+        ImGui::SetNextItemWidth(px(290));
+        ImGui::InputTextWithHint("##password", app.account_recovery ? "Nueva contraseña" : "Contraseña",
+                                 app.account_password, sizeof app.account_password, ImGuiInputTextFlags_Password);
+        ImGui::SetCursorPosX(px(22));
+        const bool filled = app.account_email[0] && app.account_password[0];
+        if (app.account_recovery) {
+            if (button("Cambiar contraseña", Btn::Primary, filled && std::strlen(app.account_code) == 6, px(180))) {
+                app.accounts->reset_password(app.account_email, app.account_code, app.account_password);
+                SecureZeroMemory(app.account_code, sizeof app.account_code);
+                SecureZeroMemory(app.account_password, sizeof app.account_password);
+            }
+        } else {
+            const bool sign_in = button("Iniciar sesión", Btn::Primary, filled, px(140));
+            ImGui::SameLine();
+            const bool sign_up = button("Crear cuenta", Btn::Secondary, filled, px(140));
+            if (sign_in || sign_up) {
+                app.accounts->sign_in(app.account_email, app.account_password, sign_up);
+                SecureZeroMemory(app.account_password, sizeof app.account_password);
+            }
+        }
+        ImGui::SetCursorPosX(px(22));
+        if (button(app.account_recovery ? "Volver al inicio de sesión" : "Recuperar acceso", Btn::Ghost, true, px(215))) {
+            app.account_recovery = !app.account_recovery;
+            SecureZeroMemory(app.account_password, sizeof app.account_password);
+            SecureZeroMemory(app.account_code, sizeof app.account_code);
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::Dummy(ImVec2(0, px(12)));
+    ImGui::EndChild();
+}
+
 // Ajustes del launcher: versión, canal, comprobar, novedades, progreso y errores.
 void launcher_page(App& app, float width) {
     float x0 = ImGui::GetCursorPosX();
@@ -773,6 +956,9 @@ void launcher_page(App& app, float width) {
     text(g_semibold, 30, P.text, "Ajustes del launcher");
     ImGui::SetCursorPosX(x0);
     text(g_regular, 13.5f, P.dim, "Las actualizaciones solo cambian el launcher. Tus juegos, partidas, salas y ajustes no se tocan, y nada se instala sin tu permiso.", width);
+    ImGui::Dummy(ImVec2(0, px(10)));
+    ImGui::SetCursorPosX(x0);
+    if (button("Cuenta", Btn::Secondary, true, px(120))) app.page = Page::Account;
     ImGui::Dummy(ImVec2(0, px(10)));
     if (!app.update_notice.empty()) {
         ImGui::SetCursorPosX(x0);
@@ -938,7 +1124,18 @@ void game_page(App& app, Game& g, float width) {
         // Sin instalar: la acción principal es instalar (con el instalador incluido en el paquete).
         if (button("Instalar", Btn::Primary, true, px(150))) open_legacy_launcher(app, g, g_window);
     } else if (button("  Jugar  ", Btn::Primary, ready && !running && !g.preparing, px(150), why)) {
-        launch_modded(g, g.adapter->offline(g.root));
+        const auto view = app.accounts->view();
+        if (!view.identity_ready && mods::game_support(g.manifest.game_id)) {
+            set_message(g, "Comprobando el perfil local de la cuenta. Vuelve a pulsar Jugar.", false);
+        } else {
+            auto save = app.accounts->local_save(g.manifest.game_id, g.root, s);
+            if (save && !account::save_location_enabled(*save)) save.reset();
+            if (save && view.save_locked) {
+                set_message(g, "Espera a que se complete la restauración del guardado.", false);
+            } else {
+                launch_modded(g, g.adapter->offline(g.root), {}, std::move(save));
+            }
+        }
     }
     bool wfc = m.has("lan_wfc");
     if (!wfc) {
@@ -1537,6 +1734,12 @@ void leave_room(App& app) {
 }
 
 void open_room(App& app, bool host) {
+    if (app.page != Page::Room) {
+        const auto account = app.accounts->view();
+        app.room_name_from_account = account.signed_in && !account.alias.empty();
+        const auto fallback = app.prefs.get("online_name", SDL_getenv("USERNAME") ? SDL_getenv("USERNAME") : "Jugador");
+        std::snprintf(app.name, sizeof app.name, "%s", (app.room_name_from_account ? account.alias : fallback).c_str());
+    }
     if (app.room || app.join_preflight) leave_room(app);
     Game& g = *app.games[app.selected];
     app.room_error.clear();
@@ -1750,7 +1953,8 @@ void room_page(App& app, float width) {
         text(g_regular, 13, P.faint, "Tu nombre");
         ImGui::SetCursorPosX(px(22));
         ImGui::SetNextItemWidth(px(260));
-        if (ImGui::InputText("##name", app.name, sizeof app.name)) app.prefs.set("online_name", app.name);
+        if (ImGui::InputText("##name", app.name, sizeof app.name) && !app.room_name_from_account)
+            app.prefs.set("online_name", app.name);
         ImGui::SetCursorPosX(px(22));
         text(g_regular, 13, P.faint, "Dirección del anfitrión y puerto");
         ImGui::SetCursorPosX(px(22));
@@ -1908,7 +2112,7 @@ int main(int argc, char** argv) {
     int select = -1;
     bool host_now = false, mods_now = false;
     std::string post_update_journal, update_failed;
-    bool auto_update = false, open_settings = false;
+    bool auto_update = false, open_settings = false, open_account = false;
     // Modo aplicador: esta copia del exe sustituye los archivos del launcher y no abre ventana.
     if (argc > 1 && !std::strcmp(argv[1], "--apply-update")) {
         upd::ApplyArgs a;
@@ -1934,6 +2138,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--host")) host_now = true;
         else if (!std::strcmp(argv[i], "--mods")) mods_now = true;  // abre la página de Mods del juego elegido (pruebas y capturas)
         else if (!std::strcmp(argv[i], "--launcher-settings")) open_settings = true;  // abre Ajustes del launcher (pruebas y capturas)  // abre la sala del juego elegido (pruebas)
+        else if (!std::strcmp(argv[i], "--account")) open_account = true;
     }
     // Junto al exe hay una carpeta manifests/ en la versión instalable; en desarrollo se usa la del repo.
     if (const char* base = SDL_GetBasePath()) {
@@ -2019,6 +2224,9 @@ int main(int argc, char** argv) {
 
     // Autoactualización: estado, mensajes de una actualización anterior y comprobación en segundo plano.
     app.updates = std::make_unique<UpdateService>(app.prefs, g_base, [] { wake(); });
+    app.accounts = std::make_unique<account::AccountService>(account::Config::from_environment(),
+                                                            local_app_data() / "WiiLauncher" / "accounts",
+                                                            [] { wake(); });
     {
         std::string from = app.prefs.get("update.from_version");
         if (!update_failed.empty()) {
@@ -2040,6 +2248,7 @@ int main(int argc, char** argv) {
         }
         if (!update_failed.empty()) app.prefs.set("update.from_version", "");
         if (open_settings) app.page = Page::Launcher;
+        if (open_account) app.page = Page::Account;
     }
 
     if (host_now && app.games[app.selected]->adapter) {
@@ -2085,6 +2294,22 @@ int main(int argc, char** argv) {
             redraw = std::max(redraw, 1);
         }
         app.updates->pump();
+        const auto owner = app.accounts->view().local_owner;
+        if (owner != app.account_queue_owner) {
+            app.account_queue_owner = owner;
+            for (const auto& game : app.games) game->account_queue_checked = false;
+        }
+        for (const auto& game : app.games) {
+            std::lock_guard<std::mutex> lock(game->mutex);
+            if (game->completed_account_save && game->completed_account_save->owner == owner &&
+                app.accounts->synchronize_save(*game->completed_account_save))
+                game->completed_account_save.reset();
+            if (!owner.empty() && game->status.ready() && !game->account_queue_checked) {
+                const auto location = app.accounts->local_save(game->manifest.game_id, game->root, game->status);
+                game->account_queue_checked = !location || !account::save_location_enabled(*location) ||
+                                              app.accounts->resume_save_queue(*location);
+            }
+        }
         if (g_minimize_launcher.exchange(false)) SDL_MinimizeWindow(window);   // el juego no pudo pasar al frente
         if (app.ready_pending && app.room && app.mods) {
             const auto ms = app.mods->snapshot();
@@ -2162,7 +2387,13 @@ int main(int argc, char** argv) {
         float width = std::min(ImGui::GetContentRegionAvail().x - px(96.0f), px(860.0f));
         ImGui::Indent(px(48));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, v4(P.card));
-        if (app.games.empty()) {
+        if (app.page != Page::Account) {
+            SecureZeroMemory(app.account_password, sizeof app.account_password);
+            SecureZeroMemory(app.account_code, sizeof app.account_code);
+        }
+        if (app.page == Page::Account) {
+            account_page(app, width);
+        } else if (app.games.empty()) {
             ImGui::SetCursorPosY(px(40));
             text(g_semibold, 20, P.text, "No hay juegos en el catálogo.");
         } else if (app.page == Page::Room && app.room_game >= 0) {
@@ -2210,6 +2441,7 @@ int main(int argc, char** argv) {
         // Mientras alguna comprobación sigue en marcha, otro fotograma cuando termine (wake()).
     }
     if (app.room) app.room->leave();
+    app.accounts.reset();
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

@@ -73,7 +73,7 @@ jobs:
         run: cmake --build build -j 4
 
       - name: Tests
-        run: ./build/wl_tests.exe
+        run: ctest --test-dir build --output-on-failure
 
       - name: Empaquetar
         run: |

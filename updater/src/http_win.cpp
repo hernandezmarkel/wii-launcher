@@ -90,7 +90,17 @@ public:
     }
 
     HttpResponse get(const HttpRequest& req) override {
+        return perform(req);
+    }
+
+    HttpResponse perform(const HttpRequest& req) override {
         HttpResponse r;
+        if ((req.method != "GET" && req.method != "POST" && req.method != "PUT" &&
+             req.method != "PATCH" && req.method != "DELETE") ||
+            req.body.size() > MAXDWORD || (req.method == "GET" && !req.body.empty())) {
+            r.error = "Petición HTTP no válida.";
+            return r;
+        }
         Url u;
         if (!session_) {
             r.error = "No se pudo iniciar la conexión de red.";
@@ -101,7 +111,7 @@ public:
             return r;
         }
         HINTERNET conn = WinHttpConnect(session_, widen(u.host).c_str(), (INTERNET_PORT)u.port, 0);
-        HINTERNET hreq = conn ? WinHttpOpenRequest(conn, L"GET", widen(u.path).c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        HINTERNET hreq = conn ? WinHttpOpenRequest(conn, widen(req.method).c_str(), widen(u.path).c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                                    u.scheme == "https" ? WINHTTP_FLAG_SECURE : 0)
                               : nullptr;
         auto close = [&] {
@@ -114,10 +124,16 @@ public:
             return r;
         }
         DWORD no_redirect = WINHTTP_DISABLE_REDIRECTS;
-        WinHttpSetOption(hreq, WINHTTP_OPTION_DISABLE_FEATURE, &no_redirect, sizeof no_redirect);
+        if (!WinHttpSetOption(hreq, WINHTTP_OPTION_DISABLE_FEATURE, &no_redirect, sizeof no_redirect)) {
+            r.error = "No se pudo desactivar la redirección HTTP.";
+            close();
+            return r;
+        }
         std::wstring headers;
         for (const auto& [k, v] : req.headers) headers += widen(k + ": " + v + "\r\n");
-        if (!WinHttpSendRequest(hreq, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(), (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        DWORD bytes = static_cast<DWORD>(req.body.size());
+        auto body = bytes ? const_cast<char*>(req.body.data()) : nullptr;
+        if (!WinHttpSendRequest(hreq, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(), (DWORD)-1L, body, bytes, bytes, 0) ||
             !WinHttpReceiveResponse(hreq, nullptr)) {
             r.error = net_error(GetLastError());
             close();
@@ -126,12 +142,13 @@ public:
         DWORD status = 0, len = sizeof status;
         WinHttpQueryHeaders(hreq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
         r.status = (int)status;
+        const bool success = status >= 200 && status < 300;
         read_headers(hreq, r);
 
         uint64_t total = 0;
         std::string cl = r.header("content-length");
         if (!cl.empty() && cl.size() < 15 && cl.find_first_not_of("0123456789") == std::string::npos) total = std::stoull(cl);
-        if (r.status == 200 && total > req.max_bytes) {
+        if (success && total > req.max_bytes) {
             r.status = 0;  // se rechaza antes de escribir un solo byte
             r.error = "El archivo es mayor de lo permitido; no se descarga.";
             close();
@@ -158,7 +175,7 @@ public:
             }
             if (n == 0) break;
             got += n;
-            uint64_t limit = r.status == 200 ? req.max_bytes : 64 * 1024;
+            uint64_t limit = success ? req.max_bytes : 64 * 1024;
             if (got > limit) {
                 r.error = "La respuesta supera el tamaño permitido.";
                 r.status = 0;
@@ -181,7 +198,7 @@ public:
                 break;
             }
         }
-        if (r.status == 200 && total && got != total) {
+        if (r.status != 0 && success && total && got != total) {
             r.error = "La descarga se cortó a medias.";
             r.status = 0;
         }
